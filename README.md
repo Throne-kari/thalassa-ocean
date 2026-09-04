@@ -9,9 +9,8 @@ Instead of treating the ocean as a background image, the page renders the sea as
 ## 🌊 Live Demo
 
 **GitHub Pages:**  
-`https://YOUR_USERNAME.github.io/YOUR_REPOSITORY/`
 
-> Replace the URL above with your actual GitHub Pages address.
+**[Open THALASSA](https://throne-kari.github.io/thalassa-ocean/)**
 
 ---
 
@@ -119,7 +118,7 @@ Disable ecology effects such as birds, meteors, spray, and bubbles:
 Example:
 
 ```text
-https://YOUR_USERNAME.github.io/YOUR_REPOSITORY/?storm=1
+https://throne-kari.github.io/thalassa-ocean/?storm=1
 ```
 
 ---
@@ -179,7 +178,7 @@ Folder: / (root)
 Your site will normally be available at:
 
 ```text
-https://YOUR_USERNAME.github.io/YOUR_REPOSITORY/
+https://throne-kari.github.io/thalassa-ocean/
 ```
 
 ---
