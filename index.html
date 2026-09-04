@@ -860,17 +860,43 @@ vec3 skyCol(vec3 d,float t){
      by ≤6 px, so the sea / sky boundary visibly separates; uCdev (0..1) is the
      CONTINUOUS vertical-development parameter driven by the storm factor: at
      high dev the tops build turrets, the base lowers and the body darkens. */
-  vec2 cxy=d.xz/up*0.30+vec2(t*0.050,t*0.018)+uPar*vec2(0.048,0.014);
-  float cl=fbm(cxy);
+  /* lattice raised 0.30→0.52 and one octave deeper: at 0.30 the WHOLE sky was
+     less than one noise cell wide, so "clouds" smeared into a gradient — that
+     is why noon still looked cloudless. One fbm4 cell ≈ a cumulus cluster. */
+  vec2 cxy=d.xz/up*0.52+vec2(t*0.050,t*0.018)+uPar*vec2(0.048,0.014);
+  float cl=fbm4(cxy);
   cl=mix(cl, max(cl, fbm4(cxy*2.3+vec2(-t*0.030,0.020))*1.22-0.14)
             + uCdev*0.05*fbm4(cxy*6.1+vec2(t*0.05,-t*0.03)), uCdev);
-  float cov=smoothstep(mix(0.52,0.30,uStorm),mix(0.87,0.64,uStorm),cl)
+  /* FAIR-WEATHER CLOUDS. The old clear-sky window (0.52..0.87) sat ABOVE the
+     fbm median, so a cloudless day rendered as a flat gradient and clouds
+     only appeared once the storm dragged the threshold down — the sky looked
+     like a weather switch. The window now straddles the median: ~30% scattered
+     cumulus at uStorm=0, tightening to a full deck at uStorm=1. uCloudAmt is
+     an EXISTING per-hour value and only biases the window, so no new per-phase
+     constants are introduced. */
+  float e0=mix(0.500,0.30,uStorm)-0.050*uCloudAmt;
+  float e1=mix(0.680,0.58,uStorm);
+  float cov=smoothstep(e0,e1,cl)
           *smoothstep(mix(0.012,0.004,uCdev),0.18,y)*(1.0-smoothstep(0.55,0.99,y));
-  float lit=0.30+0.70*pow(max(dot(d,uLightDir),0.0),1.6);
-  vec3 cloudC=mix(uCloudCol*0.42,uCloudCol,lit);
+  /* a high, thin cirrus veil: horizontally stretched cells, its own slow drift,
+     fading out as the storm deck takes over the whole column */
+  vec2 hxy=d.xz/up*vec2(0.13,0.42)+vec2(t*0.020,t*0.008)+uPar*vec2(0.030,0.010);
+  float cir=smoothstep(0.42,0.64,fbm(hxy))*smoothstep(0.22,0.42,y)*(1.0-smoothstep(0.72,0.98,y));
+  /* CLOUD LIGHTING: a cloud is bright because the sun catches its top, not
+     because the viewer looks sunward — the old lit=0.30+0.70·(sun angle) left
+     every non-sunward cloud DARKER than the noon sky, so noon clouds were
+     literally invisible. lit now carries a sun-independent body term that
+     grows with altitude, and cloudC can exceed 1.0 so white reads as white. */
+  float lit=0.45+0.30*smoothstep(0.05,0.60,y)+0.35*pow(max(dot(d,uLightDir),0.0),1.6);
+  vec3 cloudC=mix(uCloudCol*0.50,uCloudCol*1.12,lit);
   cloudC=mix(cloudC,cloudC*vec3(0.68,0.70,0.76),uCdev*(1.0-smoothstep(0.02,0.30,y)));   /* base shading */
   cloudC+=uFlash*vec3(0.50,0.54,0.62)*(0.35+0.65*uCdev);                                 /* item 23: CG bolts light the deck from under */
-  c=mix(c,cloudC,cov*uCloudAmt);
+  /* cloud BODY opacity must not equal cloud AMOUNT — the old cov*uCloudAmt made
+     even a fully-covered pixel only 20-55% cloudy, so fair-weather clouds read
+     as a flat gradient at noon. uCloudAmt now biases coverage (thresholds) and
+     only floors the blend; +0.35 is one global constant, no per-phase data. */
+  c=mix(c,cloudC,cov*min(1.0,uCloudAmt+0.50));
+  c=mix(c,cloudC*1.06,cir*min(1.0,uCloudAmt+0.30)*0.52*(1.0-uStorm));
   /* item 23: the flash must NOT blow out a daylight sky — fday keeps the bolt
      channel readable against the clouds by holding the additive back at noon */
   float fday = 1.0 - 0.58 * smoothstep(0.35, 1.05, uUw);
