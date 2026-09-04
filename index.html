@@ -1,0 +1,2430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>THALASSA — One Window, Two Worlds</title>
+<link rel="icon" href="data:," />
+<meta name="description" content="A WebGL ocean cross-section fixed to the viewport. The page scrolls normally; from top to bottom the sky travels from this evening to tomorrow noon." />
+
+<!--
+═══════════════════════════════════════════════════════════════════════════════
+  PIPELINE — three.js + GLSL + GSAP/ScrollTrigger + vanilla HTML/CSS/JS
+═══════════════════════════════════════════════════════════════════════════════
+
+  RENDER TARGET / SCREEN-SPACE REFRACTION MASK
+    Pass 1  oceanScene (fullscreen analytic quad: sky, sun, moon, clouds, stars,
+            perspective sea, glitter, underwater, caustics, shafts) + worldScene
+            (3D matter, bubbles, fish schools) → WebGLRenderTarget `rtSea`.
+    Pass 2  a low-res 2D canvas mask, rebuilt each frame ONLY while something is
+            crossing, encoding per-pixel: R = covered-by-UI, G = depth below the
+            line, B = transition-zone intensity. Uploaded as tMask.
+    Pass 3  a composite fullscreen quad samples rtSea. Where the mask is empty it
+            copies 1:1. Where a card covers the sea it re-projects the surface
+            through the SAME analytic wave field (real normals), offsets the UV
+            along that gradient, multi-taps for refractive scatter, then applies
+            spectral absorption. So the ocean seen *through* the submerged half
+            of a card is genuinely bent — not a CSS filter trick. The sea itself
+            never leaves GLSL.
+    The DOM card's submerged face is therefore left transparent: water is bent by
+    WebGL, the card's own copy is blurred/tinted/displaced by CSS, and both read
+    the same wave function, so they can never disagree.
+
+  SURFACE DISTURBANCE
+    Meniscus (uBox) curls the line around a straddling element; crossing events
+    spawn decaying ring ripples (uRip) that travel outward, modulate the cut
+    silhouette, perturb the near sea's normals and kick up foam.
+
+  DAY CYCLE
+    ScrollTrigger owns the progress (no scroll maths), 11 phases interpolated
+    continuously into ~25 uniforms. Sun is a real vector: it sets in the west,
+    a derived moon takes the key light through the night, and it is overhead at
+    noon — sky, glitter colour, shafts, caustics, fog, stars and the underwater
+    exposure all follow.
+
+  V5 — WEATHER PASSES
+    Moon is a continuous mare map (item 21a: no lattice stipple). Rain lives on
+    its own DOM layer ABOVE the glass cards (item 21b). Waves get a long swell
+    train, a 2nd-order skew crest and wind-driven whitecap streaks, all reading
+    ONE global wind vector (item 22), which also slants the rain, drifts the
+    cloud deck and moves the forked cloud-to-ground bolts. Rain crowns the sea
+    with impact ripples scaled by rain rate (item 24). Birds fly as a V flock
+    with a delayed wing-beat over a floor that follows the rising line (21c).
+═══════════════════════════════════════════════════════════════════════════════
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@200;300;400;500&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@300;400&display=swap" rel="stylesheet">
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js" } }
+</script>
+
+<style>
+:root{
+  --ink:#f2f7fb; --ink-dim:rgba(242,247,251,.86); --ink-faint:rgba(242,247,251,.5);
+  --hair:rgba(255,255,255,.18); --hair-str:rgba(255,255,255,.38);
+  --glass:rgba(9,22,38,.30);
+  --sans:"Inter Tight",system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --serif:"Instrument Serif","Songti SC",Georgia,serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --ease:cubic-bezier(.22,.61,.36,1);
+  --gutter:clamp(20px,5vw,96px);
+  --lum:1;                       /* 0 = deep night, 1 = noon; set from the day cycle */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{background:#04101a;color:var(--ink);font-family:var(--sans);font-weight:300;
+  overscroll-behavior-y:none;-webkit-font-smoothing:antialiased}
+::selection{background:rgba(143,217,238,.3)}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.svg-defs{position:absolute;width:0;height:0;pointer-events:none;opacity:0}
+
+/* ─── the sea ─── */
+#ocean{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:0}
+/* item 21b: rain must lie on the face of EVERYTHING — sea, card, text. The GL
+   canvas (z 0) sits below <main> (z 20), so a raindrop can never win a depth
+   fight there; the storm lives on its own screen-space layer above the glass. */
+#rainfall{position:fixed;inset:0;width:100%;height:100%;z-index:30;pointer-events:none;display:none;contain:strict}
+#grain,#vig{position:fixed;inset:0;z-index:1;pointer-events:none}
+#vig{background:radial-gradient(134%108% at 50% 48%,transparent 44%,rgba(1,7,14,.4))}
+#grain{opacity:.05;mix-blend-mode:overlay;animation:grain 5.2s steps(6) infinite;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='180' height='180' filter='url(%23n)'/></svg>")}
+@keyframes grain{0%{transform:translate(0,0)}20%{transform:translate(-3%,2%)}40%{transform:translate(2%,-4%)}
+60%{transform:translate(-5%,-1%)}80%{transform:translate(4%,3%)}100%{transform:translate(0,0)}}
+
+/* ─── chrome ─── */
+.progress{position:fixed;top:0;left:0;right:0;height:1px;z-index:50;background:rgba(255,255,255,.12)}
+.progress b{display:block;height:100%;width:100%;background:linear-gradient(90deg,#ff9a5c,#ffd0a0,#fff,#9fe0f2);
+  transform:scaleX(0);transform-origin:0 50%}
+.nav{position:fixed;top:0;left:0;right:0;z-index:40;display:flex;align-items:center;justify-content:space-between;
+  gap:20px;padding:clamp(16px,2.1vw,26px) var(--gutter);font-size:11.5px;letter-spacing:.19em;text-transform:uppercase}
+.brand{display:flex;align-items:baseline;gap:.62em;white-space:nowrap}
+.brand b{font-weight:400;letter-spacing:.34em;font-size:12px}
+.brand span{color:var(--ink-faint);letter-spacing:.16em;font-size:10px}
+.nav-links{display:flex;gap:clamp(14px,2.2vw,34px);color:var(--ink-dim)}
+.nav-links a{transition:color .5s var(--ease)}
+.nav-links a:hover{color:var(--ink)}
+.clock{display:flex;align-items:baseline;gap:.7em;font-family:var(--mono);font-size:11px;letter-spacing:.12em;
+  color:var(--ink-dim);white-space:nowrap}
+.clock em{font-style:normal;color:var(--ink);font-variant-numeric:tabular-nums}
+.clock i{font-style:normal;font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink-faint)}
+.nav-side{display:flex;align-items:center;gap:14px}
+.wxbtn{display:inline-flex;align-items:baseline;gap:.5em;font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ink-dim);background:rgba(255,255,255,.05);border:1px solid var(--hair);
+  border-radius:999px;padding:7px 14px;cursor:pointer;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  transition:color .5s var(--ease),border-color .5s var(--ease),background .5s var(--ease)}
+.wxbtn:hover{color:var(--ink);border-color:var(--hair-str);background:rgba(255,255,255,.10)}
+.wxbtn:focus-visible{outline:1px solid var(--hair-str);outline-offset:3px}
+.wxbtn span{color:var(--ink)}
+.wxbtn[aria-pressed="true"]{background:rgba(70,90,120,.28);border-color:rgba(160,190,220,.4)}
+#wxdbg{position:fixed;right:16px;bottom:16px;z-index:70;font-family:var(--mono);font-size:10px;line-height:1.7;
+  letter-spacing:.08em;color:#9fe0f2;background:rgba(3,10,20,.72);border:1px solid var(--hair);border-radius:8px;
+  padding:8px 12px;white-space:pre;pointer-events:none}
+@media (prefers-reduced-motion:reduce){ .wxbtn{transition:none} }
+.hint{position:fixed;left:50%;bottom:clamp(16px,2.4vw,30px);transform:translateX(-50%);z-index:40;font-size:9.5px;
+  letter-spacing:.3em;color:var(--ink-faint);text-transform:uppercase;display:flex;align-items:center;gap:10px;
+  pointer-events:none;transition:opacity .8s var(--ease)}
+.hint i{display:block;width:1px;height:22px;background:linear-gradient(to bottom,transparent,var(--ink-faint));
+  animation:drop 2.6s var(--ease) infinite}
+@keyframes drop{0%{opacity:0;transform:translateY(-8px) scaleY(.4)}40%{opacity:1}100%{opacity:0;transform:translateY(9px) scaleY(1)}}
+
+/* ─── normal document flow ─── */
+main{position:relative;z-index:20}
+.sec{min-height:102vh;display:flex;align-items:center;padding:16vh var(--gutter)}
+.inner{width:100%;max-width:1260px;margin:0 auto}
+.eyebrow{font-size:10.5px;letter-spacing:.3em;text-transform:uppercase;color:var(--ink-dim);
+  display:flex;align-items:center;gap:.9em;margin-bottom:24px}
+.eyebrow::before{content:"";width:26px;height:1px;background:var(--hair-str)}
+h1{font-family:var(--serif);font-weight:400;font-size:clamp(3rem,8.4vw,9rem);line-height:.94;letter-spacing:-.026em}
+h1 em{font-style:italic}
+h2{font-weight:200;font-size:clamp(1.9rem,4.2vw,4rem);line-height:1.04;letter-spacing:-.024em}
+h2 em{font-family:var(--serif);font-style:italic;font-weight:400}
+h3{font-size:13px;letter-spacing:.16em;text-transform:uppercase;font-weight:400;margin-bottom:10px}
+.lede{font-size:clamp(1rem,1.24vw,1.2rem);line-height:1.66;color:var(--ink-dim);max-width:36em}
+h1,h2,.lede,.body,.eyebrow,.btn,.ghost{
+  text-shadow:0 1px 2px rgba(3,12,24,.55),
+              0 2px calc(20px + (1 - var(--lum)) * 34px) rgba(3,12,24,calc(.34 + (1 - var(--lum)) * .40))}
+.wl--bare .wl-air{text-shadow:0 1px 2px rgba(3,14,28,.6),
+  0 2px calc(22px + (1 - var(--lum)) * 30px) rgba(3,14,28,calc(.42 + (1 - var(--lum)) * .38)),
+  0 6px 64px rgba(3,14,28,.34)}
+.body{font-size:14px;line-height:1.78;color:var(--ink-dim);max-width:44em}
+.mono{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--ink-faint);text-transform:uppercase}
+.hr{height:1px;background:var(--hair);width:100%}
+.btn{display:inline-flex;align-items:center;gap:.8em;border:1px solid var(--hair-str);border-radius:999px;
+  padding:13px 22px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;background:rgba(255,255,255,.06);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);transition:background .6s var(--ease),border-color .6s var(--ease)}
+.btn:hover{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.55)}
+.btn i{width:5px;height:5px;border-radius:50%;background:#ffd0a0;box-shadow:0 0 9px #ffd0a0}
+.ghost{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);
+  border-bottom:1px solid var(--hair);padding-bottom:3px;transition:color .5s var(--ease)}
+.ghost:hover{color:var(--ink)}
+.row{display:flex;align-items:center;gap:26px;flex-wrap:wrap}
+.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:clamp(18px,2.4vw,40px)}
+.cols2{display:grid;grid-template-columns:1.05fr .95fr;gap:clamp(24px,4vw,72px);align-items:center}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.7fr);gap:clamp(28px,5vw,90px);align-items:center}
+
+/* ─── glass ─── */
+.panel{border-radius:18px;border:1px solid var(--hair);background:var(--glass);padding:clamp(20px,1.7vw,28px);
+  backdrop-filter:blur(15px) saturate(1.06);-webkit-backdrop-filter:blur(15px) saturate(1.06);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 26px 70px -34px rgba(0,8,18,.72)}
+.k{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.k .lb{font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:var(--ink-faint)}
+.k .vl{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.k .vl.warm{color:#ffd0a0}.k .vl.cool{color:#8fd9ee}
+.bar{height:2px;background:rgba(255,255,255,.16);border-radius:2px;overflow:hidden;margin-top:7px}
+.bar b{display:block;height:100%;width:0;border-radius:2px;background:#fff}
+.bar.warm b{background:linear-gradient(90deg,#ff7a4d,#ffd0a0)}
+.bar.cool b{background:linear-gradient(90deg,#2c7fb8,#8fd9ee)}
+.bar.grn b{background:linear-gradient(90deg,#2f8f72,#7fe3c2)}
+.stat{font-family:var(--mono);font-weight:300;font-size:clamp(1.6rem,2.7vw,2.5rem);letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;line-height:1}
+.stat small{font-size:.42em;letter-spacing:.06em;color:var(--ink-faint);margin-left:.3em}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{border:1px solid var(--hair);border-radius:8px;padding:7px 10px;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.1em;color:var(--ink-dim)}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;vertical-align:1px}
+
+/* ─── waterline rig ─── */
+.wl{position:relative;--sub:0;--deep:0;--wet:0;--cut:0px;--h:200px;--bend:0}
+.wl-face{position:relative;display:block;border-radius:18px}
+.wl-air{border:1px solid var(--hair);background:rgba(9,22,38,calc(.30 + (1 - var(--lum)) * .30));
+  backdrop-filter:blur(15px) saturate(1.06);-webkit-backdrop-filter:blur(15px) saturate(1.06);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 26px 70px -34px rgba(0,8,18,.72);will-change:clip-path}
+/* submerged face stays transparent: WebGL bends the water behind it */
+.wl-sub{position:absolute;inset:0;overflow:hidden;border:1px solid transparent;background:none;
+  will-change:clip-path;pointer-events:none}
+.wl-in{padding:clamp(20px,1.7vw,28px)}
+.wl-sub .wl-in{transform:scale(1.014) translate3d(calc(var(--bend) * 1px),0,0);transform-origin:50% var(--cut);
+  filter:blur(calc(.6px + var(--deep) * 3.2px)) contrast(.78) brightness(.86) saturate(.66)}
+.wl-sub.crossing .wl-in{filter:blur(calc(.6px + var(--deep) * 3.2px)) contrast(.78) brightness(.86) saturate(.66) url(#refract)}
+.wl-tint,.wl-haze,.wl-sheen,.wl-drops{position:absolute;inset:0;pointer-events:none;border-radius:inherit}
+/* tint + haze describe the water in front of the panel; they stay full-box on purpose */
+.wl-tint{background:linear-gradient(to bottom,rgba(46,142,178,.16),rgba(7,38,70,.34));mix-blend-mode:multiply;
+  opacity:calc(.3 + var(--deep) * .5)}
+.wl-haze{background:linear-gradient(to bottom,rgba(126,199,224,.22),rgba(19,80,120,.22));mix-blend-mode:screen;
+  opacity:calc(var(--sub) * .26)}
+/* a thin band that rides the cut, not a full-box wash (which on a large bare
+   headline reads as an empty translucent panel) */
+.wl-sheen{inset:auto;left:0;right:0;top:var(--cut);height:calc(var(--h) * .34);
+  background:linear-gradient(102deg,transparent 34%,rgba(255,255,255,.26) 49%,transparent 64%);
+  opacity:calc(var(--wet) * .8);mix-blend-mode:screen}
+.wl--bare .wl-sheen{display:none}
+.wl-drops{inset:auto;left:0;right:0;top:var(--cut);height:calc(var(--h) * .26);overflow:hidden;border-radius:0;
+  opacity:calc(var(--wet) * .8);mix-blend-mode:screen;background-repeat:no-repeat;
+  background-image:radial-gradient(3px 4px at 18% 26%,rgba(255,255,255,.6),transparent 62%),
+  radial-gradient(2px 3px at 62% 16%,rgba(255,255,255,.5),transparent 62%),
+  radial-gradient(2.4px 3.4px at 79% 44%,rgba(255,255,255,.45),transparent 62%),
+  radial-gradient(1.6px 2.2px at 33% 54%,rgba(255,255,255,.55),transparent 62%)}
+.wl-refl{position:absolute;left:0;right:0;top:var(--cut);height:var(--h);overflow:hidden;border-radius:18px;
+  transform-origin:50% 0;transform:scaleY(-1);opacity:var(--refl,0);filter:blur(2.6px) saturate(.78) brightness(1.1);
+  pointer-events:none;-webkit-mask-image:linear-gradient(to bottom,rgba(0,0,0,.9),transparent 46%);
+  mask-image:linear-gradient(to bottom,rgba(0,0,0,.9),transparent 46%)}
+.wl-refl .wl-in{opacity:.5}
+.wl--bare>.wl-face,.wl--bare>.wl-refl{border:none;background:none;box-shadow:none;overflow:visible;
+  backdrop-filter:none;-webkit-backdrop-filter:none}
+.wl--bare .wl-air{text-shadow:0 1px 2px rgba(3,14,28,.6),0 2px 26px rgba(3,14,28,.55),0 6px 64px rgba(3,14,28,.4)}
+.wl--bare .wl-sub .wl-in{color:#a7ddef;text-shadow:0 0 26px rgba(20,104,146,.55)}
+.wl--bare .wl-tint,.wl--bare .wl-haze{display:none}
+.wl--media>.wl-face{padding:0;overflow:hidden}
+.wl--media .wl-in{padding:0}
+.wl--media .wl-air{background:none;border:1px solid var(--hair);backdrop-filter:none;-webkit-backdrop-filter:none}
+
+.wl-beads{position:absolute;inset:0;border-radius:inherit;overflow:hidden;pointer-events:none;opacity:0}
+.wl.dripping .wl-beads{animation:beadRun 1.7s var(--ease) forwards}
+.wl-beads i{position:absolute;top:-8%;display:block;border-radius:50% 50% 55% 55%;
+  background:radial-gradient(ellipse at 38% 28%, rgba(255,255,255,.92), rgba(190,228,244,.45) 55%, rgba(150,200,225,0) 72%);
+  box-shadow:0 0 6px rgba(255,255,255,.30)}
+@keyframes beadRun{
+  0%{opacity:0;transform:translateY(-4%)}
+  12%{opacity:.95}
+  70%{opacity:.55}
+  100%{opacity:0;transform:translateY(34%)}
+}
+
+/* ─── images ─── */
+.shot{position:relative;border-radius:18px;overflow:hidden;border:1px solid var(--hair);
+  box-shadow:0 26px 70px -34px rgba(0,8,18,.8);aspect-ratio:16/10;background:#0a1a28}
+.shot img{width:100%;height:100%;object-fit:cover}
+.shot figcaption{position:absolute;left:0;right:0;bottom:0;padding:14px 16px;font-family:var(--mono);font-size:9.5px;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);
+  background:linear-gradient(to top,rgba(3,14,26,.82),transparent)}
+.strip{display:grid;grid-template-columns:1.25fr .75fr;gap:clamp(14px,1.6vw,24px);align-items:end}
+
+/* ─── reveal (2D only) ───
+   No hidden state here on purpose. The stylesheet must never hide copy: only the
+   JS that measures which blocks sit below the fold may do that, so a stalled or
+   absent script leaves the whole page readable instead of blank. */
+.rv,.rvb{transform:none;opacity:1;filter:none}
+
+/* ─── footer ─── */
+footer{position:relative;z-index:20;padding:14vh var(--gutter) 12vh;border-top:1px solid var(--hair);
+  background:linear-gradient(to bottom,transparent,rgba(2,10,20,.34))}
+.fgrid{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:32px;max-width:1260px;margin:0 auto}
+.fgrid a{display:block;font-size:12.5px;color:var(--ink-dim);padding:5px 0;transition:color .4s var(--ease)}
+.fgrid a:hover{color:var(--ink)}
+.fnote{max-width:1260px;margin:64px auto 0;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--ink-faint);text-transform:uppercase}
+
+#boot{position:fixed;inset:0;z-index:90;background:#04101a;display:grid;place-items:center;transition:opacity 1.1s var(--ease)}
+#boot.off{opacity:0;pointer-events:none}
+#oops{position:fixed;inset:0;z-index:95;display:none;place-items:center;padding:40px;background:#04101a}
+#oops.on{display:grid}
+#dbgEdge{position:fixed;left:0;right:0;height:0;border-top:1px solid #ff3860;z-index:70;display:none;pointer-events:none}
+#dbgEdge.on{display:block}
+#dbgEdge i{position:absolute;top:-3px;width:1px;height:7px;background:#ff3860}
+
+@media (max-width:900px){
+  .nav-links{display:none}
+  .cols,.cols2,.split,.fgrid,.strip{grid-template-columns:1fr}
+  h1{font-size:clamp(2.6rem,13vw,5rem)}
+}
+@media (prefers-reduced-motion:reduce){
+  #grain,.hint i{animation:none}
+  .rv,.rvb{opacity:1;transform:none;filter:none}
+}
+</style>
+</head>
+<body>
+
+<canvas id="ocean"></canvas>
+<canvas id="rainfall" aria-hidden="true"></canvas>
+<div id="grain"></div><div id="vig"></div>
+<div class="progress"><b id="pbar"></b></div>
+
+<svg class="svg-defs" aria-hidden="true"><defs>
+  <filter id="refract" x="-16%" y="-16%" width="132%" height="132%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency="0.014 0.032" numOctaves="2" seed="4" result="nz">
+      <animate attributeName="baseFrequency" dur="11s" repeatCount="indefinite"
+               values="0.014 0.032;0.022 0.046;0.010 0.028;0.014 0.032"/>
+    </feTurbulence>
+    <feDisplacementMap in="SourceGraphic" in2="nz" scale="7" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</defs></svg>
+
+<header class="nav">
+  <div class="brand"><b>THALASSA</b><span>Ocean&nbsp;Optics&nbsp;Lab</span></div>
+  <nav class="nav-links">
+    <a href="#intro">Intro</a><a href="#optics">Optics</a><a href="#field">Field</a>
+    <a href="#data">Data</a><a href="#about">About</a>
+  </nav>
+  <div class="nav-side">
+    <button id="wxbtn" class="wxbtn" type="button" aria-pressed="false" title="Toggle storm — does not change the time of day">Weather · <span>Clear</span></button>
+    <div class="clock"><em id="clk">18:41</em><i id="phase">Golden hour</i></div>
+  </div>
+</header>
+
+<main>
+  <!-- 01 · HERO -->
+  <section class="sec" id="hero"><div class="inner">
+    <div class="eyebrow rv">Real-time ocean cross-section · 01</div>
+    <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+      <h1>One window,<br><em>two worlds.</em></h1>
+    </div></div><div class="wl-face wl-sub"></div><span class="wl-drops"></span></div>
+
+    <div class="split" style="margin-top:clamp(28px,4vh,56px)">
+      <div class="rv"><p class="lede">The sea is fixed to the viewport and never scrolls. The document runs down through it, and from the first screen to the last the sky travels from this evening to tomorrow noon — the water you are reading through bends the light behind it.</p></div>
+      <div class="wl rv" data-refl="1">
+        <div class="wl-face wl-air"><div class="wl-in">
+          <div class="k"><span class="lb">Station 04 · buoy</span><span class="lb" style="color:#ffd0a0">live</span></div>
+          <div class="hr" style="margin:14px 0"></div>
+          <div class="k"><span class="lb">Local time</span><span class="vl warm" data-live="clock">18:41</span></div>
+          <div class="k" style="margin-top:6px"><span class="lb">Phase</span><span class="vl" data-live="phase">Golden hour</span></div>
+          <div class="k" style="margin-top:6px"><span class="lb">Sun elevation</span><span class="vl" data-live="elev">+9.0°</span></div>
+          <div class="bar warm"><b data-live="barElev"></b></div>
+          <div class="k" style="margin-top:12px"><span class="lb">Surface</span><span class="vl cool" data-live="state">Above water</span></div>
+        </div></div>
+        <div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div>
+        <div class="wl-refl"><div class="wl-in"><div class="k"><span class="lb">Station 04 · buoy</span></div></div></div>
+        <span class="wl-sheen"></span>
+      </div>
+    </div>
+
+    <div class="row rv" style="margin-top:clamp(28px,4vh,56px)">
+      <a class="btn" href="#intro"><i></i>Scroll to descend</a>
+      <a class="ghost" href="#data">Optics data</a>
+    </div>
+  </div></section>
+
+  <!-- 02 · INTRODUCTION -->
+  <section class="sec" id="intro"><div class="inner">
+    <div class="eyebrow rv">02 · Introduction</div>
+    <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+      <h2>A cross-section, <em>not</em><br>a background.</h2>
+    </div></div><div class="wl-face wl-sub"></div></div>
+    <div class="cols2" style="margin-top:44px">
+      <div class="rvb"><p class="body">Above the line: sky, sun, cloud and a far sea receding to a real horizon. Below it: light attenuating with depth, blue absorption, haze that swallows distance, shafts bending down from the surface, and matter suspended in all of it. The boundary is not a border — it is the silhouette of a wave field evaluated per pixel, and the same function cuts this paragraph in half as you pass through it.</p></div>
+      <div class="wl rv">
+        <div class="wl-face wl-air"><div class="wl-in">
+          <div class="mono" style="margin-bottom:12px">Constants · continuous</div>
+          <div class="k"><span class="lb">Waterline</span><span class="vl">50 vh · wavy</span></div>
+          <div class="k" style="margin-top:8px"><span class="lb">Sea state</span><span class="vl">2 · slight</span></div>
+          <div class="k" style="margin-top:8px"><span class="lb">Transition zone</span><span class="vl">~70 px</span></div>
+          <div class="k" style="margin-top:8px"><span class="lb">Refraction</span><span class="vl">screen-space mask</span></div>
+          <div class="k" style="margin-top:8px"><span class="lb">Camera</span><span class="vl">fixed · 45°</span></div>
+          <div class="hr" style="margin:16px 0"></div>
+          <p class="body" style="font-size:12.5px">Nothing flies on the Z axis. The interface is a website; the ocean is a shader.</p>
+        </div></div>
+        <div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div>
+        
+      </div>
+    </div>
+  </div></section>
+
+  <!-- 03 · FEATURE -->
+  <section class="sec" id="optics"><div class="inner">
+    <div class="eyebrow rv">03 · Optics</div>
+    <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+      <h2>Three systems,<br><em>one surface.</em></h2>
+    </div></div><div class="wl-face wl-sub"></div></div>
+    <div class="cols" style="margin-top:48px">
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in"><h3>Surface</h3>
+        <p class="body" style="font-size:13px">Ten wave trains from swell to capillary, analytic normals, crests sharpened with a Gerstner shift. Six specular lobes — one per train — so glitter never flickers in sync.</p>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in"><h3>Column</h3>
+        <p class="body" style="font-size:13px">Red dies first, then orange, yellow, green. Two parallaxed haze layers dissolve distance while shafts fan out of the surface and cool as they fall.</p>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in"><h3>Sky</h3>
+        <p class="body" style="font-size:13px">Eleven phases interpolated continuously across the scroll. The sun sets in the west and rises in the east; the sea, the glitter and the light below all answer to it.</p>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+    </div>
+  </div></section>
+
+  <!-- 04 · PROJECT CONTENT + IMAGES -->
+  <section class="sec" id="field"><div class="inner">
+    <div class="eyebrow rv">04 · Field</div>
+    <div class="strip">
+      <div class="wl wl--media rvb" data-refl="1">
+        <div class="wl-face wl-air"><div class="wl-in"><figure class="shot">
+          <img alt="Low sun on an open ocean cross-section at dusk" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='750'><defs><linearGradient id='a' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%230d2340'/><stop offset='.46' stop-color='%236b89a8'/><stop offset='.5' stop-color='%23ffbd77'/><stop offset='.54' stop-color='%231d4a63'/><stop offset='1' stop-color='%2303121f'/></linearGradient></defs><rect width='1200' height='750' fill='url(%23a)'/><circle cx='838' cy='344' r='26' fill='%23fff4e0'/><g fill='%23ffffff' opacity='.22'><rect x='0' y='378' width='1200' height='2'/><rect x='0' y='392' width='1200' height='1'/><rect x='0' y='410' width='1200' height='1'/></g></svg>">
+          <figcaption>Sunset transect · 19:22 · swell 0.6 m</figcaption>
+        </figure></div></div>
+        <div class="wl-face wl-sub"><div class="wl-in"><figure class="shot" style="border:none;box-shadow:none">
+          <img alt="" aria-hidden="true" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='750'><defs><linearGradient id='a' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%230d2340'/><stop offset='.46' stop-color='%236b89a8'/><stop offset='.5' stop-color='%23ffbd77'/><stop offset='.54' stop-color='%231d4a63'/><stop offset='1' stop-color='%2303121f'/></linearGradient></defs><rect width='1200' height='750' fill='url(%23a)'/><circle cx='838' cy='344' r='26' fill='%23fff4e0'/></svg>">
+        </figure></div><span class="wl-tint"></span><span class="wl-haze"></span></div>
+        <span class="wl-sheen"></span>
+      </div>
+      <div style="display:grid;gap:clamp(14px,1.6vw,24px)">
+        <div class="wl wl--media rv"><div class="wl-face wl-air"><div class="wl-in"><figure class="shot" style="aspect-ratio:4/3">
+          <img alt="Deep water column fading to blue-black" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='800' height='600'><defs><linearGradient id='b' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%234fb0c8'/><stop offset='.4' stop-color='%23125a7e'/><stop offset='1' stop-color='%2303121f'/></linearGradient></defs><rect width='800' height='600' fill='url(%23b)'/><g stroke='%23cdefff' stroke-width='12' opacity='.14'><path d='M160 0 L120 600'/><path d='M400 0 L390 600'/><path d='M640 0 L700 600'/></g></svg>">
+          <figcaption>Attenuation column · 0–40 m</figcaption>
+        </figure></div></div><div class="wl-face wl-sub"></div></div>
+        <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in">
+          <h3>What the water does</h3>
+          <p class="body" style="font-size:13px">Every panel here is measured against the live surface, not keyed to a timeline. The bend you see through a half-sunk card is the same wave field the sea is drawn from.</p>
+        </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+      </div>
+    </div>
+  </div></section>
+
+  <!-- 05 · DATA -->
+  <section class="sec" id="data"><div class="inner">
+    <div class="eyebrow rv">05 · Instruments</div>
+    <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+      <h2>Read the <em>water.</em></h2>
+    </div></div><div class="wl-face wl-sub"></div></div>
+    <div class="cols" style="margin-top:48px">
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in">
+        <div class="k"><span class="lb">Depth of focus</span><span class="lb" data-live="state">Above water</span></div>
+        <div class="stat" style="margin:10px 0 4px"><span data-live="depth">0.0</span><small>m</small></div>
+        <div class="bar cool"><b data-live="barDepth"></b></div>
+        <div class="hr" style="margin:16px 0"></div>
+        <div class="k"><span class="lb">Water temp</span><span class="vl" data-live="temp">17.4°C</span></div>
+        <div class="k" style="margin-top:6px"><span class="lb">Index</span><span class="vl" data-live="index">1.00029</span></div>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in">
+        <div class="k"><span class="lb">Sky illuminance</span><span class="lb" data-live="phase">Golden hour</span></div>
+        <div class="stat" style="margin:10px 0 4px"><span data-live="sky">100</span><small>%</small></div>
+        <div class="bar warm"><b data-live="barSky"></b></div>
+        <div class="hr" style="margin:16px 0"></div>
+        <div class="k"><span class="lb">Underwater</span><span class="vl cool" data-live="uw">100%</span></div>
+        <div class="k" style="margin-top:6px"><span class="lb">Glitter index</span><span class="vl" data-live="gi">0.95</span></div>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in">
+        <div class="k"><span class="lb">Sun track</span><span class="lb">west → east</span></div>
+        <div class="stat" style="margin:10px 0 4px" data-live="elev">+9.0°</div>
+        <div class="bar warm"><b data-live="barElev"></b></div>
+        <div class="hr" style="margin:16px 0"></div>
+        <div class="k"><span class="lb">Red at depth</span><span class="vl warm" data-live="rPct">100%</span></div>
+        <div class="bar warm"><b data-live="bR"></b></div>
+        <div class="k" style="margin-top:10px"><span class="lb">Blue at depth</span><span class="vl cool" data-live="bPct">100%</span></div>
+        <div class="bar cool"><b data-live="bB"></b></div>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+    </div>
+  </div></section>
+
+  <!-- 06 · ABOUT -->
+  <section class="sec" id="about"><div class="inner">
+    <div class="eyebrow rv">06 · About</div>
+    <div class="cols2">
+      <div>
+        <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+          <h2>Built as a website.<br><em>Rendered as a sea.</em></h2>
+        </div></div><div class="wl-face wl-sub"></div></div>
+        <div class="rvb" style="margin-top:26px"><p class="body">Three.js, GLSL, GSAP ScrollTrigger and plain DOM. The sky, the glitter, the shafts and the line that cuts these cards are one analytic pass rendered to a target, then refracted through a screen-space mask built from these very elements.</p></div>
+      </div>
+      <div class="wl rv"><div class="wl-face wl-air"><div class="wl-in">
+        <div class="k"><span class="lb">Renderer</span><span class="vl" data-live="gl">WebGL2</span></div>
+        <div class="k" style="margin-top:6px"><span class="lb">Frame</span><span class="vl cool" data-live="fps">60 fps</span></div>
+        <div class="k" style="margin-top:6px"><span class="lb">Water geometry</span><span class="vl">0 tris</span></div>
+        <div class="k" style="margin-top:6px"><span class="lb">Refraction</span><span class="vl" data-live="rt">rt + mask</span></div>
+        <div class="hr" style="margin:16px 0"></div>
+        <div class="chips">
+          <span class="chip"><span class="dot" style="background:#ffd0a0"></span>Three.js</span>
+          <span class="chip"><span class="dot" style="background:#8fd9ee"></span>GLSL</span>
+          <span class="chip"><span class="dot" style="background:#7fe3c2"></span>GSAP</span>
+        </div>
+      </div></div><div class="wl-face wl-sub"><span class="wl-tint"></span><span class="wl-haze"></span></div></div>
+    </div>
+  </div></section>
+</main>
+
+<footer id="foot"><div class="inner">
+  <div class="wl wl--bare rv"><div class="wl-face wl-air"><div class="wl-in">
+    <h2>Noon, <em>and back up.</em></h2>
+  </div></div><div class="wl-face wl-sub"></div><span class="wl-drops"></span></div>
+  <div class="fgrid" style="margin-top:56px">
+    <div class="rvb"><div class="mono" style="margin-bottom:10px">Thalassa · Ocean Optics Lab</div>
+      <p class="body" style="font-size:13px;max-width:34ch">A prototype for a fixed sea cross-section with a scroll-driven day cycle. Evening to noon, surface to forty metres.</p></div>
+    <div class="rv"><div class="mono" style="margin-bottom:12px">Sections</div>
+      <a href="#hero">Surface</a><a href="#intro">Introduction</a><a href="#optics">Optics</a></div>
+    <div class="rv"><div class="mono" style="margin-bottom:12px">Field</div>
+      <a href="#field">Transects</a><a href="#data">Instruments</a><a href="#about">About</a></div>
+    <div class="rv"><div class="mono" style="margin-bottom:12px">Elsewhere</div>
+      <a href="#hero">Journal</a><a href="#hero">Contact</a><a href="#hero">Index</a></div>
+  </div>
+  <div class="fnote">
+    <span>© 2026 Thalassa</span>
+    <span>Sea state 2 · wind 3.4 m/s · Jerlov I</span>
+    <span data-live="phase">Golden hour</span>
+  </div>
+</div></footer>
+
+<div class="hint" id="hint"><i></i>Scroll · evening to noon</div>
+<div id="dbgEdge"></div>
+<div id="boot"><div class="mono">Filling the ocean…</div></div>
+<div id="oops"><div style="max-width:46ch;line-height:1.75;color:var(--ink-dim);font-size:14px;text-align:center">
+  <strong style="color:var(--ink)">This prototype needs a local server.</strong><br><br>
+  ES modules and CDN imports are blocked on <code>file://</code>. Run
+  <code>python3 -m http.server 5174</code> or <code>npx serve .</code> in this folder, then open
+  <code>http://localhost:5174</code>.</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+
+<script type="module">
+/* ═════════════ 0 · guards ═════════════ */
+const boot = document.getElementById('boot');
+const oops = document.getElementById('oops');
+const say = (m) => { console.warn('[thalassa] ' + m); oops.classList.add('on'); boot.classList.add('off'); };
+const REDUCE = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const Q = new URLSearchParams(location.search);
+/* ?noecology=1 turns birds, meteors, spray and bubbles off while leaving the
+   surface, the cut and the day cycle completely intact. */
+const ECO = !REDUCE && Q.get('noecology') !== '1';
+/* verification counters — cheap, and the only honest way to confirm effects that
+   only exist while scrolling (screenshots can't show them) */
+/* item 24: rainHits counts rain-crown impacts; rainhit / rainhitTotal are the
+   crown-droplet counters (makeEmit wires them automatically by opts.name) */
+const FXSTAT = { splash: 0, bubble: 0, splashTotal: 0, bubbleTotal: 0, meteor: 0, ripples: 0, drips: 0, lightning: 0,
+  rainHits: 0, rainhit: 0, rainhitTotal: 0 };
+let SYNTH = null;   /* set by ?probe=3 to keep spray firing while a frame is captured */
+const MOBILE = matchMedia('(max-width: 900px)').matches || !matchMedia('(hover: hover)').matches;
+
+let THREE;
+try { THREE = await import('three'); } catch (e) { say('three.js could not be loaded from the CDN'); throw e; }
+if (!window.gsap) { say('GSAP could not be loaded'); throw new Error('gsap missing'); }
+gsap.registerPlugin(ScrollTrigger);
+
+/* ═════════════ 1 · shared surface (one wave function, GLSL + JS twins) ═════════════ */
+/* ONE analytic field. [kx, kz] rad/m, amp metres, speed rad/s.
+   Read by: far sea (height + normals), near cut silhouette, particle clip,
+   refraction gradient, and the JS twin that builds DOM clip-paths. */
+const TRAINS = [
+  [ 0.1630, 0.0480, 0.1150, 0.34],
+  [-0.0520, 0.1310, 0.0850, 0.41],
+  [ 0.3200,-0.1400, 0.0550, 0.72],
+  [-0.2100, 0.2900, 0.0400, 0.88],
+  [ 0.6200, 0.2400, 0.0200, 1.34],
+  [-0.4100, 0.7800, 0.0140, 1.62],
+  [ 0.9500,-0.5200, 0.0100, 1.95],
+  [ 2.1000, 0.9000, 0.00450, 2.60],
+  [-1.3500, 2.6000, 0.00300, 3.05],
+  [ 3.4000,-1.6000, 0.00200, 3.60],
+  [ 1.9000, 4.2000, 0.00130, 4.15],
+  [-5.1000, 2.3000, 0.00090, 4.80],
+  [ 6.2000, 5.1000, 0.00060, 5.50],
+  [ 9.4000,-3.1000, 0.00040, 6.40],
+  [-3.0000,11.2000, 0.00028, 7.30],
+  /* item 22: low-frequency primary swell — λ ≈ 80 m; storm uWAmp 2.6 doubles
+     its share so the whole field gains height and a dominant period */
+  [-0.0780, 0.0240, 0.2600, 0.155],
+];
+const NWMAX = 16;
+const BASE = 0.0, HORIZON = 0.30, FOV = 45, TAN = 0.4142032, EYE_H = 1.4, PX_PER_M = 54;
+/* Where the slice is cut, and how sea height maps to the screen: a height h at
+   distance z subtends ndc-y = (h/z)/tan(fov/2). */
+const NEAR_Z = 18.0;
+let NEARX = 1, HTON = 1;
+function remap(){ NEARX = TAN * (S.W / S.H) * NEAR_Z; HTON = 1 / (NEAR_Z * TAN);
+  if (uni) { uni.uNearX.value = NEARX; uni.uHtoN.value = HTON; } }
+
+const SURFACE_FN = [
+  'const float TAN = 0.4142032;',
+  'const float NEARZ = 18.0;   /* must match JS NEAR_Z */',
+  'uniform float uTime, uBase, uSink, uNearX, uHtoN;',
+  'uniform float uWAmp;',
+  /* item 22: one signed wind vector + derived crest skew; uPar is the smoothed
+     mouse the sea/sky boundary parallaxes against; uRainAmt roughens the
+     surface while it rains. JS twins: S.windX / S.skew / S.mx / S.rainA */
+  'uniform float uWindX, uSkew, uRainAmt;',
+  'uniform vec2  uPar;',
+  'uniform vec4  uW[16];   /* kx, kz, amp, speed */',
+  'uniform vec4  uBox[8];  /* cx, amp, halfWidth, dir */',
+  'uniform vec4  uRip[6];  /* cx, amp, birth, dir */',
+  'uniform int   uWn, uBoxN, uRipN;',
+  'float hash(vec2 p){ p = fract(p*vec2(127.31,311.7)); p += dot(p,p+34.77); return fract(p.x*p.y); }',
+  'float vnoise(vec2 p){ vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);',
+  '  float a=hash(i),b=hash(i+vec2(1.0,0.0)),c=hash(i+vec2(0.0,1.0)),d=hash(i+vec2(1.0,1.0));',
+  '  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y); }',
+  'float fbm(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<3;i++){ s+=a*vnoise(p); p=p*2.13+vec2(11.7,3.1); a*=0.5; } return s; }',
+  /* item 21a/22: one octave deeper for maps that must read as CONTINUOUS fields
+     (moon maria, storm cloud decks) — 3-octave value noise goes stipply */
+  'float fbm4(vec2 p){ float s=0.0,a=0.5; for(int i=0;i<4;i++){ s+=a*vnoise(p); p=p*2.07+vec2(9.3,5.7); a*=0.5; } return s; }',
+  /* item 22: skew crest shaping — identical to the JS skewShape() above */
+  'float skewShape(float H){ float hn = clamp(H * 3.0, -1.0, 1.0); return H + uSkew * hn * abs(hn) * 0.35; }',
+  '/* THE field — term for term identical to the JS twin. */',
+  'void field(vec2 p, float t, out float H, out vec2 G){',
+  '  H = 0.0; G = vec2(0.0);',
+  '  for (int i = 0; i < 16; i++){',
+  '    if (i >= uWn) break;',
+  '    float a = dot(uW[i].xy, p) + t * uW[i].w + float(i) * 1.7;',
+  '    H += uW[i].z * uWAmp * sin(a); G += uW[i].z * uWAmp * uW[i].xy * cos(a);',
+  '  }',
+  '  float hn = clamp(H * 3.0, -1.0, 1.0);        /* item 22: sharpened crest */',
+  '  H += uSkew * hn * abs(hn) * 0.35;',
+  '  G *= 1.0 + uSkew * 0.30 * abs(hn);           /* steeper flanks follow it */',
+  '}',
+  'float fieldH(vec2 p, float t){',
+  '  float H = 0.0;',
+  '  for (int i = 0; i < 16; i++){ if (i >= uWn) break;',
+  '    H += uW[i].z * uWAmp * sin(dot(uW[i].xy, p) + t * uW[i].w + float(i) * 1.7); }',
+  '  return skewShape(H);',
+  '}',
+  '/* wind-roughness patches: modulate glitter coverage, not geometry */',
+  'float roughAt(vec2 p, float t){ return 0.55 + 1.05 * fbm(p * 0.019 + vec2(t*0.013, -t*0.021)); }',
+  '/* rings thrown off by an object piercing the surface */',
+  'float ripOffset(float x, float t){',
+  '  float o = 0.0;',
+  '  for (int i = 0; i < 6; i++){',
+  '    if (i >= uRipN) break;',
+  '    float age = t - uRip[i].z;',
+  '    if (age < 0.0 || age > 2.8) continue;',
+  '    float rn = step(4.0, uRip[i].w);   /* item 24: dir > 4 = rain ring */',
+  '    float d = abs(x - uRip[i].x) - age * mix(0.135, 0.062, rn);',
+  '    float env = exp(-abs(d) * mix(34.0, 60.0, rn)) * exp(-age * mix(1.7, 3.6, rn)) * uRip[i].y;',
+  '    o += sin(d * 190.0) * env;',
+  '  }',
+  '  return o;',
+  '}',
+  '/* the cut silhouette IS the sea on the slice plane */',
+  'float edgeNdcY(float x){',
+  '  /* item 22: boundary answers to the mouse, max ~6 px at the screen edge */',
+  '  float xp = x + uPar.x * 0.0032;',
+  '  float y = uBase + uSink + fieldH(vec2(xp * uNearX, NEARZ), uTime) * uHtoN;',
+  '  for (int i = 0; i < 8; i++){',
+  '    if (i >= uBoxN) break;',
+  '    float d = (x - uBox[i].x) / max(uBox[i].z, 0.03);',
+  '    y += uBox[i].y * exp(-d * d) * uBox[i].w;',
+  '  }',
+  '  y += ripOffset(x, uTime) * 0.0045;',
+  '  return y;',
+  '}',
+].join('\n');
+/* ONE definition, shared verbatim by the sea, the composite and the particles:
+   the cut line, the particle clip and the refraction bend cannot drift apart. */
+
+const ST0 = Q.get('storm') === '1' ? 1 : 0;
+const S = { W:1, H:1, t:0, p:0, tgt:0, sink:0, mx:0, my:0, mtx:0, mty:0, boxes:[], rips:[],
+  storm: ST0, stormT: ST0, wamp: 1 + ST0*1.6, flash: 0, dbl: -1, boltT: 4 + Math.random()*9,
+  rainT: 0.4, dbg: null, dbgT: 0, lumPrev: '',
+  /* item 22: the ONE wind vector (−1..1, signed) that rain slant, wave skew,
+     cloud drift, whitecap advection and bolt drift all answer to */
+  windX: 0, skew: 0, rainA: 0, boltDrift: 0 };
+function measure(){ S.W = document.documentElement.clientWidth||innerWidth; S.H = document.documentElement.clientHeight||innerHeight; }
+measure();
+const ndcXof = (px) => (px / S.W) * 2 - 1;
+const pxYofNdc = (n) => (1 - (n + 1) * 0.5) * S.H;
+/* item 22: 2nd-order Stokes crest shaping — crests sharpen, troughs flatten,
+   and the asymmetry SIGN follows the global wind. GLSL field()/fieldH() twins
+   must stay term-for-term identical (skewShape + the lines below). */
+function skewShape(H){
+  const hn = Math.max(-1, Math.min(1, H * 3.0));
+  return H + S.skew * hn * Math.abs(hn) * 0.35;
+}
+function fieldH(wx, wz, t){
+  let H = 0;
+  for (let i = 0; i < TRAINS.length; i++){ const w = TRAINS[i]; H += w[2] * S.wamp * Math.sin(w[0]*wx + w[1]*wz + t*w[3] + i*1.7); }
+  return skewShape(H);
+}
+function fieldG(wx, wz, t){
+  let gx = 0, gz = 0, H = 0;
+  for (let i = 0; i < TRAINS.length; i++){
+    const w = TRAINS[i], a = w[0]*wx + w[1]*wz + t*w[3] + i*1.7, c = Math.cos(a);
+    gx += w[2]*w[0]*c*S.wamp; gz += w[2]*w[1]*c*S.wamp; H += w[2]*S.wamp*Math.sin(a);
+  }
+  const hn = Math.max(-1, Math.min(1, H * 3.0));
+  const k = 1 + S.skew * 0.30 * Math.abs(hn);
+  return [gx * k, gz * k];
+}
+/* calm = skip the card-induced bulge and every ripple: the rain floor is the
+   OPEN SEA line only (item 21b — streaks never clip to a card's meniscus) */
+function edgeNdc(x, calm){
+  /* the DOM is cut by the very surface the shader draws; the parallax term is
+     identical to the GLSL twin (item 22, ≤6 px at the screen edge) */
+  let y = BASE + S.sink + fieldH((x + S.mx * 0.0032) * NEARX, NEAR_Z, S.t) * HTON;
+  if (calm) return y;
+  for (let i = 0; i < S.boxes.length; i++){
+    const b = S.boxes[i], d = (x - b.cx) / Math.max(b.hw, 0.03);
+    y += b.amp * Math.exp(-d*d) * b.dir;
+  }
+  for (let i = 0; i < S.rips.length; i++){
+    const r = S.rips[i], age = S.t - r.t0;
+    if (age < 0 || age > 2.8) continue;
+    /* item 24: rain rings (dir > 4) travel ≈ 0.8 m/s and decay fast; object
+       rings keep the old reach. Mirrored term-for-term in GLSL ripOffset(). */
+    const rn = r.dir > 4;
+    const d = Math.abs(x - r.cx) - age * (rn ? 0.062 : 0.135);
+    y += Math.sin(d*190) * Math.exp(-Math.abs(d)*(rn ? 60 : 34)) * Math.exp(-age*(rn ? 3.6 : 1.7)) * r.amp * 0.0045;
+  }
+  return y;
+}
+const edgePx = (pxX) => pxYofNdc(edgeNdc(ndcXof(pxX)));
+
+/* ═════════════ 2 · day cycle ═════════════ */
+const PHASES = [
+  {p:0.00,name:'Golden hour',clk:1121,el:9,az:0.62,sun:[1,.74,.44],si:1,zen:[.048,.094,.196],mid:[.262,.412,.618],low:[.744,.686,.624],amb:[.30,.36,.48],ai:.10,star:0,cloud:[1,.87,.78],ca:.55,wd:[.012,.048,.112],ws:[.078,.335,.420],uw:1,shaft:.30,glit:.95},
+  {p:0.10,name:'Sunset',clk:1162,el:1.2,az:0.55,sun:[1,.52,.26],si:.95,zen:[.035,.055,.135],mid:[.30,.25,.36],low:[.93,.48,.28],amb:[.26,.22,.34],ai:.10,star:.05,cloud:[1,.62,.48],ca:.62,wd:[.01,.036,.086],ws:[.062,.23,.30],uw:.82,shaft:.22,glit:.85},
+  {p:0.18,name:'Twilight',clk:1205,el:-6,az:0.42,sun:[.9,.42,.34],si:.25,zen:[.02,.032,.086],mid:[.105,.105,.23],low:[.38,.27,.36],amb:[.18,.22,.38],ai:.12,star:.35,cloud:[.42,.4,.56],ca:.45,wd:[.007,.024,.06],ws:[.036,.14,.21],uw:.55,shaft:.14,glit:.45},
+  {p:0.27,name:'Night',clk:1300,el:-13,az:0.30,sun:[.6,.35,.4],si:.06,zen:[.012,.024,.062],mid:[.048,.072,.140],low:[.095,.118,.190],amb:[.12,.18,.32],ai:.21,star:.8,cloud:[.18,.22,.32],ca:.30,wd:[.006,.022,.052],ws:[.024,.092,.150],uw:.34,shaft:.09,glit:0.34},
+  {p:0.40,name:'Midnight',clk:1480,el:-26,az:0.05,sun:[.4,.3,.4],si:0,zen:[.008,.014,.042],mid:[.028,.044,.092],low:[.055,.072,.122],amb:[.09,.14,.26],ai:.22,star:1,cloud:[.12,.15,.24],ca:.20,wd:[.005,.016,.040],ws:[.018,.066,.118],uw:.22,shaft:.05,glit:0.34},
+  {p:0.50,name:'Pre-dawn',clk:1700,el:-20,az:-0.18,sun:[.5,.36,.46],si:.03,zen:[.016,.024,.062],mid:[.055,.068,.135],low:[.120,.105,.170],amb:[.12,.14,.28],ai:.20,star:.85,cloud:[.20,.20,.32],ca:.28,wd:[.007,.024,.052],ws:[.024,.084,.138],uw:.30,shaft:.07,glit:0.34},
+  {p:0.58,name:'Dawn',clk:1785,el:-6,az:-0.34,sun:[.98,.62,.52],si:.22,zen:[.030,.050,.120],mid:[.18,.16,.28],low:[.62,.38,.36],amb:[.20,.20,.32],ai:.12,star:.3,cloud:[.86,.58,.56],ca:.50,wd:[.008,.03,.07],ws:[.04,.16,.23],uw:.52,shaft:.16,glit:.45},
+  {p:0.66,name:'Sunrise',clk:1838,el:2,az:-0.52,sun:[1,.70,.42],si:.9,zen:[.055,.11,.23],mid:[.33,.43,.60],low:[.92,.62,.42],amb:[.26,.28,.38],ai:.10,star:.04,cloud:[1,.76,.62],ca:.58,wd:[.010,.042,.096],ws:[.058,.25,.32],uw:.80,shaft:.24,glit:.80},
+  {p:0.76,name:'Early morning',clk:1925,el:15,az:-0.42,sun:[1,.88,.72],si:1,zen:[.070,.150,.320],mid:[.33,.52,.72],low:[.76,.80,.83],amb:[.32,.40,.52],ai:.10,star:0,cloud:[1,.98,.96],ca:.55,wd:[.014,.06,.13],ws:[.060,.310,.420],uw:1,shaft:.34,glit:1},
+  {p:0.88,name:'Late morning',clk:2060,el:38,az:-0.22,sun:[1,.96,.88],si:1.05,zen:[.055,.18,.43],mid:[.30,.56,.83],low:[.70,.80,.89],amb:[.34,.46,.62],ai:.10,star:0,cloud:[1,1,1],ca:.45,wd:[.014,.070,.152],ws:[.050,.272,.388],uw:1.15,shaft:.46,glit:1.15},
+  {p:1.00,name:'Noon',clk:2160,el:60,az:-0.02,sun:[1,.99,.96],si:1.12,zen:[.040,.19,.52],mid:[.28,.55,.84],low:[.60,.74,.86],amb:[.36,.50,.68],ai:.10,star:0,cloud:[1,1,1],ca:.38,wd:[.016,.082,.178],ws:[.052,.290,.400],uw:1.30,shaft:.60,glit:1.30},
+];
+const lerp=(a,b,t)=>a+(b-a)*t, lerp3=(a,b,t)=>[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];
+const D = {};
+function dayAt(p){
+  let i = 0; while (i < PHASES.length-2 && p > PHASES[i+1].p) i++;
+  const a = PHASES[i], b = PHASES[i+1];
+  const raw = (p - a.p) / Math.max(1e-6, b.p - a.p), t = raw*raw*(3-2*raw);
+  D.name = t < .5 ? a.name : b.name;
+  for (const k of ['clk','el','az','si','ai','star','ca','uw','shaft','glit']) D[k] = lerp(a[k], b[k], t);
+  for (const k of ['sun','zen','mid','low','amb','cloud','wd','ws']) D[k] = lerp3(a[k], b[k], t);
+  D.me = Math.max(3, -D.el*0.8 + 7); D.ma = -D.az;
+  D.mi = Math.max(0, Math.min(1, (0.18 - D.si)/0.18)) * Math.max(0, Math.min(1, (D.el + 2)/-8));
+}
+const dirFrom = (elDeg, ndcX) => new THREE.Vector3(ndcX*TAN*(S.W/S.H), Math.tan(elDeg*Math.PI/180)*TAN, -1).normalize();
+
+/* ═════════════ 3 · renderer, render target, refraction mask ═════════════ */
+const canvas = document.getElementById('ocean');
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ canvas, antialias:false, alpha:false, stencil:false, powerPreference:'high-performance', preserveDrawingBuffer: Q.get('probe') !== null }); }
+catch (e) { say('WebGL is unavailable'); throw e; }
+const DPR = MOBILE ? 1.25 : 1.5, QUAL = MOBILE ? 0 : 1;
+renderer.setPixelRatio(Math.min(devicePixelRatio||1, DPR));
+renderer.setSize(S.W, S.H, false);
+renderer.autoClear = false;
+
+const rtScale = MOBILE ? 0.8 : 1;
+const rtSea = new THREE.WebGLRenderTarget(1,1,{ minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter,
+  format:THREE.RGBAFormat, type:THREE.UnsignedByteType, depthBuffer:true, stencilBuffer:false });
+
+const maskScale = MOBILE ? 0.3 : 0.45;
+const maskCv = document.createElement('canvas');
+const maskCtx = maskCv.getContext('2d');
+const maskTex = new THREE.CanvasTexture(maskCv);
+maskTex.minFilter = maskTex.magFilter = THREE.LinearFilter;
+maskTex.generateMipmaps = false;
+
+const oceanScene = new THREE.Scene(), oceanCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const worldScene = new THREE.Scene(), worldCam = new THREE.PerspectiveCamera(FOV, S.W/S.H, 0.1, 240);
+worldCam.position.set(0,1.9,9); worldCam.lookAt(0,-9,-24);
+const compScene = new THREE.Scene(), compCam = oceanCam;
+
+const V3 = (a)=>new THREE.Vector3(a[0],a[1],a[2]);
+const uni = {
+  uRes:{value:new THREE.Vector2(S.W,S.H)},
+  uTime:{value:0},uBase:{value:BASE},uSink:{value:0},uNearX:{value:1},uHtoN:{value:1},uHorizon:{value:HORIZON},uQual:{value:QUAL},uPathW:{value:2.6},
+  uW:{value:Array.from({length:NWMAX},(_,i)=>{const w=TRAINS[i];return w?new THREE.Vector4(w[0],w[1],w[2],w[3]):new THREE.Vector4(0,0,0,1);})},uWn:{value:TRAINS.length},
+  uBox:{value:Array.from({length:8},()=>new THREE.Vector4(0,0,.1,1))},uBoxN:{value:0},
+  uRip:{value:Array.from({length:6},()=>new THREE.Vector4(0,0,-99,1))},uRipN:{value:0},
+  uSunDir:{value:new THREE.Vector3()},uSunCol:{value:new THREE.Vector3()},uSunInt:{value:1},
+  uMoonDir:{value:new THREE.Vector3()},uMoonCol:{value:new THREE.Vector3(.74,.82,.96)},uMoonInt:{value:0},
+  uLightDir:{value:new THREE.Vector3()},uLightCol:{value:new THREE.Vector3()},uLightInt:{value:1},uLightNdc:{value:new THREE.Vector2()},
+  uZen:{value:new THREE.Vector3()},uMidS:{value:new THREE.Vector3()},uLow:{value:new THREE.Vector3()},
+  uAmb:{value:new THREE.Vector3()},uAmbInt:{value:.1},uStar:{value:0},
+  uCloudCol:{value:new THREE.Vector3()},uCloudAmt:{value:.5},
+  uWDeep:{value:new THREE.Vector3()},uWShal:{value:new THREE.Vector3()},
+  uUw:{value:1},uShaft:{value:.3},uGlit:{value:1},
+  uStorm:{value:0},uFlash:{value:0},uWAmp:{value:1},uWind:{value:0},
+  /* item 21a/22: the wind family + parallax + rain roughness + cloud development */
+  uWindX:{value:0},uSkew:{value:0},uRainAmt:{value:0},uCdev:{value:0.12},
+  uPar:{value:new THREE.Vector2(0,0)},
+};
+const FS_QUAD_V = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+/* ═════════════ 4 · the sea itself (GLSL only — never CSS) ═════════════ */
+const oceanFrag = `
+precision highp float;
+varying vec2 vUv;
+uniform vec2 uRes; uniform float uHorizon, uQual;
+uniform vec3 uSunDir,uSunCol,uMoonDir,uMoonCol,uLightDir,uLightCol,uLightNdc;
+uniform float uSunInt,uMoonInt,uLightInt;
+uniform vec3 uZen,uMidS,uLow,uAmb,uCloudCol,uWDeep,uWShal;
+uniform float uAmbInt,uStar,uCloudAmt,uUw,uShaft,uGlit,uPathW,uStorm,uFlash,uCdev;
+${SURFACE_FN}
+const float EYE_H = 1.4;
+float tanA(void){ return TAN * (uRes.x / uRes.y); }
+vec3 skyCol(vec3 d,float t){
+  float y=d.y, yy=max(y,-0.06);
+  vec3 c=mix(uMidS,uZen,smoothstep(0.08,0.72,yy));
+  c=mix(uLow,c,smoothstep(-0.02,0.13,yy));
+  c=mix(c,uLow*0.55,1.0-smoothstep(-0.14,0.0,y));
+  float mu=max(dot(d,uSunDir),0.0);
+  c+=uSunCol*pow(mu,5.0)*0.13*uSunInt;
+  c+=uSunCol*pow(mu,30.0)*0.30*uSunInt;
+  c+=uSunCol*pow(mu,1100.0)*1.15*uSunInt;
+  c+=uSunCol*exp(-abs(y)*16.0)*(0.05+0.22*pow(mu,3.0))*uSunInt;
+  if (uMoonInt > 0.002){
+    /* item 21a — CONTINUOUS MARE MAP. The old code fed the SURFACE NORMAL
+       (which swings ±45° here) into fbm at freq 7.5 and 23, so both fields
+       resolved to hash-lattice stipples: the "square dots". Now the disc is
+       parameterised by mp — the normalised on-disc position, radius 1 — and
+       every albedo field is a large-cell, low-contrast fbm4 of mp: 2-3 cells
+       across the maria, sub-pixel nothing. The terminator reads mp too, so it
+       is one continuous shadow gradient, not a thresholded dither. */
+    vec3 mu = normalize(uMoonDir);
+    vec3 upv = mix(vec3(0.0,1.0,0.0), vec3(1.0,0.0,0.0), step(0.985, abs(mu.y)));
+    vec3 rt = normalize(cross(upv, mu)), ru = cross(mu, rt);
+    const float MR = 0.0255;
+    vec3 dv = d - mu;
+    float mAng = length(dv);
+    vec2 mp = vec2(dot(dv, rt), dot(dv, ru)) / MR;
+    float rr = length(mp);
+    if (rr < 1.0){
+      float mare  = smoothstep(0.47, 0.63, fbm4(mp * 1.30 + vec2(2.31, 7.14)));   /* 2-3 huge dark regions */
+      float grime = fbm4(mp * 3.40 + vec2(5.20, 1.30));                           /* medium mottling */
+      float grain = vnoise(mp * 6.50 + vec2(8.40, 2.20));                         /* highland grain, low weight */
+      float alb = 0.585 + 0.115 * grime + 0.045 * grain - 0.205 * mare;
+      /* two continuous ring craters (dark floor + bright rim), no lattice */
+      vec2 k1 = vec2(-0.34, 0.30), k2 = vec2(0.42, -0.18);
+      float d1 = length(mp - k1), d2 = length(mp - k2);
+      alb += -0.105 * (1.0 - smoothstep(0.020, 0.072, d1)) + 0.085 * (1.0 - smoothstep(0.000, 0.026, abs(d1 - 0.078)));
+      alb += -0.085 * (1.0 - smoothstep(0.014, 0.052, d2)) + 0.070 * (1.0 - smoothstep(0.000, 0.020, abs(d2 - 0.056)));
+      /* soft terminator: sun projected into the disc plane, one smooth sweep */
+      vec2 sunp = vec2(dot(uSunDir, rt), dot(uSunDir, ru));
+      sunp = sunp / max(length(sunp), 1e-5);
+      float term = smoothstep(-0.92, 0.30, dot(mp, sunp));
+      float limb = mix(1.0, 0.74, pow(rr, 2.6));
+      float ext = 0.30 + 0.70 * smoothstep(0.0, 0.34, mu.y);
+      c += uMoonCol * alb * limb * ext * (0.24 + 0.76 * term) * uMoonInt * 1.7;
+    }
+    /* item 21a: the corona may stay — as ONE continuous blob of light. Large
+       smooth cells, wide smoothsteps; no hard square stipple anywhere. */
+    float hf = fbm4(mu.xz * 0.8 / (abs(mu.y) + 0.22) + vec2(1.7, 4.3));
+    float hsw = smoothstep(0.36, 0.74, hf);
+    c += uMoonCol * exp(-pow(mAng/(MR*7.5),2.0)) * (0.045 + 0.10 * hsw) * uMoonInt
+       * (0.4 + 0.6*smoothstep(0.0, 0.25, mu.y));
+  }
+  if(uStar>0.002){
+    /* round point-like stars on a jittered cell grid — not square confetti */
+    vec2 sp = d.xz / (abs(d.y) + 0.22) * 170.0;
+    vec2 cell = floor(sp), fr = fract(sp) - 0.5;
+    float hs = hash(cell);
+    float on = step(0.968, hs);
+    vec2 jit = (vec2(hash(cell + 0.31), hash(cell + 0.77)) - 0.5) * 0.66;
+    float pt = 1.0 - smoothstep(0.0, 0.05, length(fr - jit));
+    float tw = 0.55 + 0.45 * sin(t * 1.3 + hs * 80.0);
+    c += vec3(0.88,0.93,1.0) * on * pt * tw * uStar * 1.15 * smoothstep(0.01,0.22,y);
+  }
+  float up=max(abs(y)+0.06,0.06);
+  /* item 22 — cloud parallax: the sample lattice answers to the smoothed mouse
+     by ≤6 px, so the sea / sky boundary visibly separates; uCdev (0..1) is the
+     CONTINUOUS vertical-development parameter driven by the storm factor: at
+     high dev the tops build turrets, the base lowers and the body darkens. */
+  vec2 cxy=d.xz/up*0.30+vec2(t*0.050,t*0.018)+uPar*vec2(0.048,0.014);
+  float cl=fbm(cxy);
+  cl=mix(cl, max(cl, fbm4(cxy*2.3+vec2(-t*0.030,0.020))*1.22-0.14)
+            + uCdev*0.05*fbm4(cxy*6.1+vec2(t*0.05,-t*0.03)), uCdev);
+  float cov=smoothstep(mix(0.52,0.30,uStorm),mix(0.87,0.64,uStorm),cl)
+          *smoothstep(mix(0.012,0.004,uCdev),0.18,y)*(1.0-smoothstep(0.55,0.99,y));
+  float lit=0.30+0.70*pow(max(dot(d,uLightDir),0.0),1.6);
+  vec3 cloudC=mix(uCloudCol*0.42,uCloudCol,lit);
+  cloudC=mix(cloudC,cloudC*vec3(0.68,0.70,0.76),uCdev*(1.0-smoothstep(0.02,0.30,y)));   /* base shading */
+  cloudC+=uFlash*vec3(0.50,0.54,0.62)*(0.35+0.65*uCdev);                                 /* item 23: CG bolts light the deck from under */
+  c=mix(c,cloudC,cov*uCloudAmt);
+  /* item 23: the flash must NOT blow out a daylight sky — fday keeps the bolt
+     channel readable against the clouds by holding the additive back at noon */
+  float fday = 1.0 - 0.58 * smoothstep(0.35, 1.05, uUw);
+  c+=uFlash*fday*vec3(0.62,0.66,0.78)*(0.26+0.50*smoothstep(-0.15,0.7,y));
+  c+=uFlash*fday*vec3(0.50,0.55,0.68)*cov*uCloudAmt*1.15;
+  return c+uAmb*uAmbInt;
+}
+float glint(vec3 N,vec3 V,vec3 L,float sh,float ph,float t){
+  vec3 Hv=normalize(L-V);
+  return pow(max(dot(N,Hv),0.0),sh)*(0.60+0.40*sin(ph+t*(0.85+fract(ph)*2.4)));
+}
+vec3 seaColour(vec2 p,float f,float below,float t){
+  float z=min(EYE_H/(TAN*max(below,0.00045)),2400.0);
+  float x=p.x*tanA()*z;
+  float H; vec2 G; field(vec2(x,z),t,H,G);
+  /* normals are amplified (and short waves that fall under a pixel are faded
+     out) so glitter keeps its slope while the silhouette stays calm */
+  float kn = mix(9.5, 2.4, f);
+  vec2 Gs=G*(1.0+uStorm*0.7); H*=1.0;
+  vec3 N=normalize(vec3(-Gs.x*kn,1.0,-Gs.y*kn));
+  vec3 V=normalize(vec3(x,-EYE_H,-z));
+  vec3 R=reflect(V,N);
+  float F=0.021+0.979*pow(1.0-max(dot(N,-V),0.0),5.0);
+  vec3 body=mix(uWShal*0.78,uWDeep,smoothstep(0.0,0.45,f));
+  float sss=pow(max(dot(V,uLightDir),0.0),3.0)*clamp(H*0.55+0.45,0.0,1.0);
+  body+=uLightCol*sss*0.16*uLightInt*(1.0-f);
+  /* the sea mirrors the sky, but never becomes it — otherwise the band reads as
+     a flat cream stripe instead of water */
+  vec3 refl=skyCol(R,t)*(0.46+0.14*uUw);
+  vec3 col=mix(body, refl, F*0.78);
+  float g=0.0;
+  g+=glint(N,V,uLightDir, 520.0,0.00,t)*0.85;
+  g+=glint(N,V,uLightDir,1150.0,1.31,t)*0.70;
+  g+=glint(N,V,uLightDir,2400.0,2.71,t)*0.62;
+  g+=glint(N,V,uLightDir,4200.0,4.09,t)*0.55;
+  if(uQual>0.5){ g+=glint(N,V,uLightDir,6800.0,5.37,t)*0.30; g+=glint(N,V,uLightDir,9600.0,6.83,t)*0.22; }
+  float rough=roughAt(vec2(x,z)*(1.0+uStorm*0.8),t*(1.0+uStorm*1.6))*(1.0+uStorm*0.55);
+  /* item 24: rain pockmarks the surface — micro-roughness the glitter reads */
+  rough += uRainAmt * (0.30 + 0.45 * vnoise(vec2(x*0.40 + t*0.55, z*0.34 - t*0.42)));
+  float vis=smoothstep(0.0,0.10,f)*(1.0-smoothstep(0.52,0.995,f));
+  col+=uLightCol*g*vis*uGlit*1.35*(0.45+0.75*rough);
+  /* item 22 — WIND-STREAKED WHITECAPS: anisotropic noise stretched along the
+     global wind vector, advected by it; appears only past mid storm, never
+     random circles. Reads the SAME uWindX as the rain slant and skew crest. */
+  float wcOn = smoothstep(0.35, 0.75, uStorm);
+  if (wcOn > 0.0){
+    vec2 wd = normalize(vec2(uWindX, 0.34) + vec2(1e-4));
+    vec2 wp = vec2(-wd.y, wd.x);
+    vec2 sc = vec2(dot(vec2(x,z), wd) * 0.10 + t * wd.x * 0.10, dot(vec2(x,z), wp) * 3.1 - t * wd.y * 0.05);
+    float wst = smoothstep(0.50, 0.80, fbm4(sc));
+    wst *= wcOn * vis * (0.55 + 0.45 * smoothstep(0.30, 0.60, roughAt(vec2(x,z)*0.7, t)));
+    col = mix(col, vec3(0.80,0.88,0.92) * (0.40 + 0.60 * uUw), wst * 0.55);
+  }
+  /* day: broad warm path · night: narrow cold moon path */
+  col+=uLightCol*exp(-pow((p.x-uLightNdc.x)*uPathW,2.0))*pow(max(0.0,1.0-f),1.5)*0.10*uLightInt;
+  float foam=smoothstep(mix(0.070,0.045,uStorm),mix(0.150,0.115,uStorm),H)*(1.0-smoothstep(0.02,0.34,f));
+  col=mix(col,vec3(0.86,0.92,0.95)*(0.35+0.65*uUw),foam*(0.28+0.18*uStorm));
+  /* item 23: one-frame flash catches the crests (foam answers to the sky) */
+  col+=vec3(0.55,0.60,0.70)*uFlash*foam*0.30;
+  vec3 haze=mix(skyCol(normalize(vec3(x,0.02,-z)),t),uWDeep*2.3,0.44);
+  col=mix(col,haze,smoothstep(0.78,0.999,f));
+  return col;
+}
+vec3 underColour(vec2 p,float dep,float t){
+  vec3 col=mix(uWShal*0.92,mix(uWShal,uWDeep,0.55),smoothstep(0.0,0.34,dep));
+  col=mix(col,uWDeep,smoothstep(0.26,1.0,dep)*0.94);
+  float l1=fbm(vec2(p.x*2.4-t*0.020,dep*2.1-t*0.011)), l2=fbm(vec2(p.x*5.1+t*0.033,dep*4.4+t*0.020));
+  col*=0.90+l1*0.20;
+  col=mix(col,uWShal*0.55,l2*0.10*(1.0-dep*0.8));
+  col*=1.0-pow(dep,1.35)*0.48;
+  float sx=(p.x-uLightNdc.x)/(0.40+dep*1.55);
+  float band=fbm(vec2(sx*2.05+t*0.026,t*0.017));
+  float shaft=smoothstep(0.50,0.86,band)*pow(max(0.0,1.0-dep),1.5);
+  shaft*=0.50+0.50*pow(max(0.0,1.0-abs(p.x-uLightNdc.x)*1.1),2.2);
+  col+=mix(uLightCol,uWShal*1.6,0.45)*shaft*uShaft*2.0;
+  float cd=1.0-smoothstep(0.0,0.30,dep);
+  if(cd>0.001){
+    vec2 q=vec2(p.x*5.2+t*0.26,dep*15.0-t*0.85);
+    float c1=pow(abs(sin(q.x*1.30+sin(q.y*0.62+t*0.70)*1.35)),9.0);
+    float c2=pow(abs(sin(q.y*1.15+sin(q.x*0.80-t*0.55)*1.20)),11.0);
+    float ca=(c1+c2)*0.5*(0.55+0.45*sin(p.x*21.0+t*1.7+sin(dep*9.0)*2.0));
+    col+=uWShal*2.0*max(ca,0.0)*cd*0.30*(uUw*0.9);
+  }
+  col+=uWShal*1.5*pow(max(0.0,1.0-dep*7.0),2.2)*0.12*uUw;
+  col*=1.0-0.30*uStorm*(0.25+0.75*dep);
+  col+=vec3(0.55,0.62,0.78)*uFlash*(0.20+0.65*(1.3-min(1.3,uUw)))*(1.0-dep*0.7);
+  float v=1.0-smoothstep(0.55,1.35,length(vec2(p.x*0.85,(dep-0.30)*1.05)));
+  return col*(0.64+0.36*v);
+}
+void main(){
+  float t=uTime;
+  vec2 p=vUv*2.0-1.0;
+  float aa=max(2.4/uRes.y,0.0008);
+  float edge=edgeNdcY(p.x);
+  float hor=uHorizon+uSink*0.55;
+  vec3 col=skyCol(normalize(vec3(p.x*tanA(),p.y*TAN,-1.0)),t);
+  float aboveEdge=smoothstep(edge-aa,edge+aa,p.y);
+  float band=(1.0-smoothstep(hor-aa,hor+aa,p.y))*aboveEdge;
+  float f=clamp((p.y-edge)/max(hor-edge,0.0001),0.0,1.0);
+  col=mix(col,seaColour(p,f,hor-p.y,t),band);
+  float dep=clamp((edge-p.y)/max(edge+1.0,0.001),0.0,1.0);
+  col=mix(col,underColour(vec2(p.x,dep),dep,t),1.0-aboveEdge);
+  /* meniscus: dimmer, and brighter on wave backsides so it never reads as a rule */
+  float eslope = abs(edgeNdcY(p.x + 0.02) - edgeNdcY(p.x - 0.02));
+  col+=vec3(0.72,0.92,1.00)*exp(-abs(p.y-edge)/(aa*3.0))*0.07*(0.35+0.65*uUw)*(0.55+min(1.6,eslope*90.0));
+  col-=vec3(0.05,0.10,0.13)*exp(-max(0.0,edge-p.y)/(aa*9.0))*0.5;
+  float fleck=step(0.80,vnoise(vec2(p.x*44.0+t*1.6,edge*60.0-t*2.4)));
+  col+=vec3(0.85,0.94,0.98)*fleck*exp(-abs(p.y-edge)/(aa*5.0))*0.22*uUw;
+  col=col/(col+vec3(0.86))*1.86;
+  col=pow(max(col,0.0),vec3(0.925));
+  col=mix(col,col*vec3(1.020,1.004,0.992),0.6);
+  gl_FragColor=vec4(col,1.0);
+}
+`;
+const oceanMat = new THREE.ShaderMaterial({ uniforms:uni, depthTest:false, depthWrite:false,
+  vertexShader:FS_QUAD_V, fragmentShader:oceanFrag });
+const oceanQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), oceanMat);
+oceanQuad.frustumCulled = false; oceanScene.add(oceanQuad);
+
+/* ═════════════ 5 · composite: real refraction through the UI mask ═════════════ */
+const compFrag = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tSea, tMask;
+uniform vec2 uRes;
+uniform vec3 uWShal, uWDeep, uLightCol;
+uniform float uUw, uFlash;
+${SURFACE_FN}
+/* the bend uses the very field the waterline is drawn from */
+vec2 surfGrad(vec2 p, float t){
+  float H; vec2 G; field(vec2(p.x * uNearX, NEARZ), t, H, G);
+  return G;
+}void main(){
+  vec2 p = vUv * 2.0 - 1.0;
+  vec3 m = texture2D(tMask, vUv).rgb;
+  float cover = m.r;
+  if (cover < 0.004){ gl_FragColor = vec4(texture2D(tSea, vUv).rgb, 1.0); return; }
+  float dep = m.g, wet = m.b;
+  float edge = edgeNdcY(p.x);
+  vec2 G = surfGrad(p, uTime);
+  /* bend along the live surface gradient; deeper objects bend more, and the
+     transition zone adds a meniscus squeeze toward the line */
+  float slope = clamp((G.x + G.y) * uHtoN * 26.0, -1.0, 1.0);
+  float amt = 0.0075 + dep * 0.017 + wet * 0.010;
+  vec2 dir = normalize(vec2(slope, 0.35) + vec2(0.0, sign(p.y - edge) * 0.25));
+  vec2 off = dir * amt * (0.55 + 0.45 * abs(slope));
+  off.x += sin(p.y * 150.0 + uTime * 2.4 + dep * 6.0) * (0.0009 + wet * 0.0016);
+  off.y += cos(p.x * 120.0 - uTime * 2.0) * (0.0006 + wet * 0.0012);
+  float b = 0.0007 + dep * 0.0028 + wet * 0.0012;   /* refractive scatter */
+  vec3 c = texture2D(tSea, vUv + off).rgb * 0.34
+         + texture2D(tSea, vUv + off + vec2( b,  b * 0.4)).rgb * 0.18
+         + texture2D(tSea, vUv + off + vec2(-b,  b * 0.4)).rgb * 0.18
+         + texture2D(tSea, vUv + off + vec2( b*0.4, -b)).rgb * 0.15
+         + texture2D(tSea, vUv + off + vec2(-b*0.4, -b)).rgb * 0.15;
+  /* spectral absorption: red leaves first, blue stays, brightness drops */
+  vec3 absorb = mix(vec3(1.0), uWShal * 1.5 + uWDeep * 0.4, clamp(dep * 0.85 + 0.18, 0.0, 1.0));
+  c *= mix(vec3(1.0), absorb, cover * (0.35 + dep * 0.55));
+  c = mix(c, uWShal * 0.55 * (0.4 + 0.6 * uUw), cover * dep * 0.22);
+  c += uLightCol * wet * 0.05 + uFlash * (0.08 + wet * 0.22) * (0.35 + 0.65 * cover);   /* lightning picks up the glass edges */
+  gl_FragColor = vec4(c, 1.0);
+}
+`;
+const compMat = new THREE.ShaderMaterial({
+  uniforms: Object.assign({}, uni, { tSea:{value:rtSea.texture}, tMask:{value:maskTex} }),
+  depthTest:false, depthWrite:false, vertexShader:FS_QUAD_V, fragmentShader:compFrag });
+const compQuad = new THREE.Mesh(new THREE.PlaneGeometry(2,2), compMat);
+compQuad.frustumCulled = false; compScene.add(compQuad);
+
+/* ═════════════ 6 · 3-D matter, bubbles, fish schools ═════════════ */
+const N_MOTE = MOBILE?220:620;
+/* continuous ambient bubbles: count scales with viewport area (~1 / 14k px²) */
+const N_BUB = Math.max(MOBILE?30:60, Math.min(MOBILE?70:190, Math.round(S.W*S.H/14000)));
+const SCHOOLS = MOBILE ? 1 : 3, PER = MOBILE ? 3 : 6;
+const N_FISH = SCHOOLS * PER;
+
+function mkGeo(n){
+  return { pos:new Float32Array(n*3), sz:new Float32Array(n), ph:new Float32Array(n),
+           kd:new Float32Array(n), al:new Float32Array(n), n };
+}
+function fillMotes(){
+  const tot = N_MOTE + N_BUB, g = mkGeo(tot);
+  for (let i=0;i<N_MOTE;i++){
+    g.pos.set([ (Math.random()*2-1)*17, -Math.random()*30, -8-Math.random()*40 ], i*3);
+    g.sz[i]=0.3+Math.random()*1.05; g.ph[i]=Math.random()*6.283; g.kd[i]=0; g.al[i]=0.45+Math.random()*0.75;
+  }
+  for (let i=0;i<N_BUB;i++){
+    const j=N_MOTE+i, lay=i%3;   /* far / mid / near sub-layers rise at their own pace */
+    if (lay===0){
+      g.pos.set([ (Math.random()*2-1)*17, -1-Math.random()*30, -28-Math.random()*16 ], j*3);
+      g.sz[j]=0.70+Math.random()*0.35; g.al[j]=0.30+Math.random()*0.18; g.kd[j]=1.00;
+    } else if (lay===1){
+      g.pos.set([ (Math.random()*2-1)*15, -1-Math.random()*30, -16-Math.random()*13 ], j*3);
+      g.sz[j]=1.00+Math.random()*0.60; g.al[j]=0.45+Math.random()*0.22; g.kd[j]=1.16;
+    } else {
+      g.pos.set([ (Math.random()*2-1)*11, -1-Math.random()*28, -8-Math.random()*8 ], j*3);
+      g.sz[j]=1.60+Math.random()*1.00; g.al[j]=0.60+Math.random()*0.28; g.kd[j]=1.32;
+    }
+    g.ph[j]=Math.random()*6.283;
+  }
+  return g;
+}
+function bind(g){
+  const g3=new THREE.BufferGeometry();
+  g3.setAttribute('position',new THREE.BufferAttribute(g.pos,3));
+  g3.setAttribute('aSize',new THREE.BufferAttribute(g.sz,1));
+  g3.setAttribute('aPhase',new THREE.BufferAttribute(g.ph,1));
+  g3.setAttribute('aKind',new THREE.BufferAttribute(g.kd,1));
+  g3.setAttribute('aAlpha',new THREE.BufferAttribute(g.al,1));
+  return g3;
+}
+const moteGeo = bind(fillMotes());
+
+const FIELD_VERT = `
+attribute float aSize, aPhase, aKind, aAlpha;
+varying float vNdcX,vNdcY,vW,vA,vKind,vFog;
+uniform float uPix, uUw;
+${SURFACE_FN}
+void main(){
+  vec3 p = position; float t = uTime;
+  if (aKind > 1.5){
+    /* school members are steered on the CPU — the shader must not move them */
+  } else if (aKind > 0.5){
+    float lay = clamp((aKind - 1.0) * 3.0, 0.0, 1.0);   /* 0 far · ~0.5 mid · 1 near */
+    p.y = -31.0 + mod(position.y + 31.0 + t * (0.55 + lay * 0.28 + aSize * 0.12), 31.0);
+    p.x += sin(t*(0.7+lay*0.45)+aPhase)*0.30; p.z += cos(t*0.7+aPhase*1.7)*0.20;
+  } else {
+    p.x += sin(t*0.11+aPhase)*0.85; p.y += sin(t*0.075+aPhase*1.4)*0.55; p.z += cos(t*0.05+aPhase*0.7)*0.75;
+  }
+  vec4 mv = modelViewMatrix * vec4(p,1.0);
+  gl_Position = projectionMatrix * mv;
+  vNdcX=gl_Position.x; vNdcY=gl_Position.y; vW=gl_Position.w;
+  float d = max(-mv.z, 0.35);
+  vFog = exp(-max(d-6.0,0.0)*0.028);
+  float isB = step(0.5, aKind) * step(aKind, 1.5);
+  vA = aAlpha * (0.55+0.45*vFog) * mix(0.35+0.65*uUw, 1.35+0.55*uUw, isB);
+  vKind = aKind;
+  float sf = aKind > 1.5 ? 6.5 : (aKind > 0.5 ? 4.0 + 1.4 * clamp((aKind - 1.0) * 3.0, 0.0, 1.0) : 1.0);
+  gl_PointSize = clamp(aSize*sf*uPix*${MOBILE?'52.0':'58.0'}/d, 2.5, max(5.0, aSize*sf*uPix*6.5));
+}`;
+const FIELD_FRAG = `
+precision highp float;
+varying float vNdcX,vNdcY,vW,vA,vKind,vFog;
+uniform vec3 uLightCol;
+${SURFACE_FN}
+void main(){
+  vec2 q = gl_PointCoord*2.0-1.0; float m; vec3 col;
+  if (vKind > 1.5){
+    float s = 1.0 - smoothstep(0.0,1.0,length(vec2(q.x/0.88,q.y/0.30)));
+    float tail = 1.0 - smoothstep(0.0,1.0,length(vec2((q.x+0.92)/0.34,q.y/0.42)));
+    m = max(s, tail*0.85); col = vec3(0.02,0.06,0.11);
+  } else if (vKind > 0.5){
+    float r = length(q);
+    /* rim-lit hollow bubble: broken bright ring, clear centre, one specular,
+       soft skirt — never a solid white dot */
+    float ang = atan(q.y, q.x);
+    float ring = smoothstep(0.30, 0.44, r) * (1.0 - smoothstep(0.44, 0.56, r));
+    ring *= 0.72 + 0.28 * sin(ang * 3.0 + vFog * 40.0);
+    float spec = 1.0 - smoothstep(0.0, 0.17, length(q - vec2(-0.16, 0.17)));
+    float film = (1.0 - smoothstep(0.0, 0.40, r)) * 0.10;
+    m = ring * 1.45 + spec * 1.15 + film;
+    col = vec3(0.78, 0.93, 1.00);
+  } else {
+    m = 1.0 - smoothstep(0.12,0.6,length(q));
+    col = mix(vec3(0.16,0.40,0.54), mix(vec3(0.58,0.80,0.88), uLightCol, 0.22), vFog);
+  }
+  float e = edgeNdcY(vNdcX/vW);
+  float under = 1.0 - smoothstep(e-0.012, e+0.006, vNdcY/vW);
+  float a = m*vA*under;
+  if (a < 0.005) discard;
+  gl_FragColor = vec4(col*a, a);
+}`;
+const moteMat = new THREE.ShaderMaterial({ transparent:true, depthTest:false, depthWrite:false,
+  blending:THREE.AdditiveBlending, uniforms:Object.assign({},uni,{uPix:{value:renderer.getPixelRatio()}}),
+  vertexShader:FIELD_VERT, fragmentShader:FIELD_FRAG });
+const motes = new THREE.Points(moteGeo, moteMat);
+motes.frustumCulled = false; worldScene.add(motes);
+
+/* schools: every fish keeps an offset around a moving anchor; the anchor
+   drifts and turns, so the shoal reads as one animal rather than confetti */
+const fishGeo = new THREE.BufferGeometry();
+const fishData = { pos:new Float32Array(N_FISH*3), sz:new Float32Array(N_FISH), ph:new Float32Array(N_FISH),
+                   kd:new Float32Array(N_FISH), al:new Float32Array(N_FISH) };
+const anchors = [];
+for (let s=0;s<SCHOOLS;s++) anchors.push({ x:(Math.random()*2-1)*10, y:-6-Math.random()*13, z:-16-Math.random()*26,
+  r:1.6+Math.random()*2.4, sp:0.10+Math.random()*0.13, dir:Math.random()<.5?-1:1, ph:Math.random()*6.28 });
+for (let i=0;i<N_FISH;i++){
+  fishData.sz[i]=2.0+Math.random()*2.0; fishData.ph[i]=Math.random()*6.283;
+  fishData.kd[i]=2; fishData.al[i]=0.12+Math.random()*0.12;
+}
+fishGeo.setAttribute('position',new THREE.BufferAttribute(fishData.pos,3));
+fishGeo.setAttribute('aSize',new THREE.BufferAttribute(fishData.sz,1));
+fishGeo.setAttribute('aPhase',new THREE.BufferAttribute(fishData.ph,1));
+fishGeo.setAttribute('aKind',new THREE.BufferAttribute(fishData.kd,1));
+fishGeo.setAttribute('aAlpha',new THREE.BufferAttribute(fishData.al,1));
+const fishMat = new THREE.ShaderMaterial({ transparent:true, depthTest:false, depthWrite:false,
+  blending:THREE.NormalBlending, uniforms:Object.assign({},uni,{uPix:{value:renderer.getPixelRatio()}}),
+  vertexShader:FIELD_VERT, fragmentShader:FIELD_FRAG });
+const fish = new THREE.Points(fishGeo, fishMat);
+fish.frustumCulled = false; worldScene.add(fish);
+function updateSchools(t){
+  const a = fishGeo.attributes.position.array;
+  for (let s=0;s<SCHOOLS;s++){
+    const an = anchors[s];
+    const ax = an.x + Math.sin(t*an.sp*an.dir + an.ph) * 9.0;
+    const ay = an.y - S.storm * 4.5 + Math.sin(t*an.sp*0.6 + an.ph*1.7) * 1.1;
+    const az = an.z + Math.cos(t*an.sp*0.8 + an.ph) * 4.0;
+    for (let k=0;k<PER;k++){
+      const i = s*PER+k, o = k/PER*6.283;
+      a[i*3]   = ax + Math.cos(o + t*0.22*an.dir) * an.r;
+      a[i*3+1] = ay + Math.sin(o*1.7 + t*0.30) * an.r*0.28;
+      a[i*3+2] = az + Math.sin(o + t*0.19*an.dir) * an.r*1.5;
+    }
+  }
+  fishGeo.attributes.position.needsUpdate = true;
+}
+/* seats the shoal once; from here the CPU steers it every frame */
+updateSchools(0);
+
+/* ═════════════ 6b · splash & bubbles ═════════════
+   The waterline is a screen-space line, so spray leaving it must be screen-space
+   too: its own ortho pass straight to the canvas keeps every droplet pinned to
+   the surface it came from. Pools are fixed-size and reused — no allocation in
+   the frame loop. */
+let splashFx = null, bubbleFx = null;
+const fxScene = new THREE.Scene();
+function makeEmit(opts) {
+  const CAP = opts.cap;
+  const px = new Float32Array(CAP * 3), sz = new Float32Array(CAP),
+        ph = new Float32Array(CAP), kd = new Float32Array(CAP), al = new Float32Array(CAP);
+  const vx = new Float32Array(CAP), vy = new Float32Array(CAP),
+        life = new Float32Array(CAP), span = new Float32Array(CAP);
+  for (let i = 0; i < CAP; i++) { px[i * 3 + 1] = -9; sz[i] = 0.001; kd[i] = opts.kind; ph[i] = Math.random() * 6.283; span[i] = 0; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(px, 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(sz, 1));
+  g.setAttribute('aPhase', new THREE.BufferAttribute(ph, 1));
+  g.setAttribute('aKind', new THREE.BufferAttribute(kd, 1));
+  g.setAttribute('aAlpha', new THREE.BufferAttribute(al, 1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: Object.assign({}, uni, { uPix: { value: renderer.getPixelRatio() }, uTint: { value: new THREE.Vector3(1, 1, 1) } }),
+    vertexShader: [
+      'attribute float aSize, aKind, aAlpha;',
+      'varying float vA, vK;',
+      'uniform float uPix;',
+      'void main(){',
+      '  gl_Position = vec4(position.xy, 0.0, 1.0);',
+      '  vA = aAlpha; vK = aKind;',
+      '  gl_PointSize = clamp(aSize * uPix * 300.0, 1.5, 22.0 * uPix);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'varying float vA, vK;',
+      'uniform vec3 uTint;',
+      'void main(){',
+      '  vec2 q = gl_PointCoord * 2.0 - 1.0;',
+      '  float r = length(q), m;',
+      '  if (vK > 1.5) m = smoothstep(0.26, 0.43, r) * (1.0 - smoothstep(0.43, 0.52, r)) * 1.0 + (1.0 - smoothstep(0.02, 0.19, length(q - vec2(-0.16, 0.17)))) * 0.9 + (1.0 - smoothstep(0.10, 0.40, r)) * 0.10;',
+      '  else m = 1.0 - smoothstep(0.08, 0.54, r);',
+      '  float a = m * vA;',
+      '  if (a < 0.004) discard;',
+      '  gl_FragColor = vec4(uTint * a, a);',
+      '}',
+    ].join('\n'),
+  });
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false;
+  fxScene.add(pts);
+  let cursor = 0;
+  return {
+    mat,
+    emit(cxNdc, wNdc, impact, prof) {
+      const budget = Math.min(opts.perFrame, Math.round(2 + impact * 10 * prof.splash));
+      for (let k = 0; k < budget; k++) {
+        const i = cursor; cursor = (cursor + 1) % CAP;
+        const u = Math.random() * 2 - 1;
+        const x = cxNdc + u * wNdc * 0.92;
+        const yPx = pxYofNdc(edgeNdc(x));
+        if (yPx < -40 || yPx > S.H + 40) continue;
+        px[i * 3] = x; px[i * 3 + 1] = 1 - (yPx / S.H) * 2; px[i * 3 + 2] = 0;
+        if (opts.kind === 1) {
+          if (opts.crown) {          /* item 24: crown splash — tiny, fast, skirt-out */
+            vx[i] = u * (0.06 + impact * 0.10);
+            vy[i] = (0.16 + Math.random() * 0.18) * (0.5 + impact * 0.7);
+            span[i] = 0.30 + Math.random() * 0.32;
+            sz[i] = 0.0060 + Math.random() * 0.0060;
+          } else {
+            vx[i] = u * (0.02 + impact * 0.06) * Math.min(1.5, prof.splash);
+            vy[i] = (0.10 + Math.random() * 0.22) * (0.4 + impact * 0.8) * Math.min(1.2, prof.splash);
+            span[i] = 0.45 + Math.random() * 0.45;
+            sz[i] = 0.0100 + Math.random() * 0.0140;
+          }
+        } else {
+          px[i * 3 + 1] -= 0.022 + Math.random() * 0.085;   /* born BELOW the line */
+          vx[i] = u * 0.02;
+          vy[i] = -(0.03 + Math.random() * 0.08) * (0.4 + impact) * Math.min(1.4, prof.bubble);
+          span[i] = 1.1 + Math.random() * 1.4;
+          sz[i] = 0.018 + Math.random() * 0.026;
+        }
+        life[i] = 0; al[i] = 0; FXSTAT[opts.name + 'Total']++;
+      }
+    },
+    step(dt) {
+      let busy = 0;
+      for (let i = 0; i < CAP; i++) {
+        if (life[i] >= span[i]) { if (al[i] !== 0) { al[i] = 0; px[i * 3 + 1] = -9; } continue; }
+        life[i] += dt;
+        const t = life[i] / span[i];
+        if (opts.kind === 1) {
+          vy[i] -= 1.15 * dt;                       /* gravity on the droplets */
+          vx[i] *= (1 - 1.4 * dt);
+          px[i * 3] += vx[i] * dt; px[i * 3 + 1] += vy[i] * dt;
+        } else {
+          vy[i] += 0.30 * dt;                       /* buoyancy on the bubbles */
+          vx[i] *= (1 - 2.0 * dt);
+          px[i * 3] += vx[i] * dt + Math.sin(life[i] * 7 + ph[i]) * 0.0012;
+          px[i * 3 + 1] += vy[i] * dt;
+        }
+        const surface = edgeNdc(px[i * 3]);
+        const now = px[i * 3 + 1];
+        if (opts.kind === 1 ? (now < surface && life[i] > 0.05) : (now >= surface && life[i] > 0.18)) { life[i] = span[i]; al[i] = 0; continue; }
+        al[i] = (opts.kind === 1 ? 1.35 : 1.30) * Math.sin(Math.PI * Math.min(1, t));
+        busy++;
+      }
+      if (busy) { FXSTAT[opts.name] = busy; g.attributes.position.needsUpdate = true; g.attributes.aAlpha.needsUpdate = true; g.attributes.aSize.needsUpdate = true; }
+    },
+  };
+}
+splashFx = makeEmit({ name: 'splash', cap: MOBILE ? 220 : 640, kind: 1, perFrame: MOBILE ? 6 : 14 });
+bubbleFx = makeEmit({ name: 'bubble', cap: MOBILE ? 120 : 380, kind: 2, perFrame: MOBILE ? 5 : 10 });
+
+
+/* ═════════════ 6b² · weather — one stormFactor drives the whole scene ═════════════
+   stormFactor 0..1 is INDEPENDENT of the day cycle: Noon + Storm stays a grey,
+   pouring DAY; Midnight + Storm is a black one. It scales cloud cover, rain,
+   wave amplitude, wind, foam, rain ripples and lightning cadence. */
+let boltFx = null, crownFx = null;
+/* item 21b: the GL rain pass is GONE — WebGL (z 0) sits below the DOM cards
+   (z 20), so no raindrop drawn there can ever beat a card's glass. The storm
+   now paints into rainLayer (section 6b³), above everything it must hit. */
+/* item 23 — CLOUD-TO-GROUND BOLT IN THREE LAYERS:
+   1) bright core: a stepped-leader polyline (alternating near-vertical drops
+      and lateral jogs) as additive LineSegments — main channel and branches in
+      SEPARATE buffers so branches can snap off on their own schedule;
+   2) soft outer halo: additive point sprites strung along the main polyline
+      (a glow you can see without any bloom pass);
+   3) a timing envelope: instant on, gone in 150-300 ms — hard off.
+   Strike x drifts with the global wind (S.windX + S.boltDrift) and every
+   channel ends at the live cut line, not a fixed crosshair. */
+function makeBolt(){
+  const V = 170;
+  const aM = new Float32Array(V*3), aB = new Float32Array(V*3), aG = new Float32Array(V*3);
+  const gSz = new Float32Array(V), gAl = new Float32Array(V);
+  const gM = new THREE.BufferGeometry(); gM.setAttribute('position', new THREE.BufferAttribute(aM,3)); gM.setDrawRange(0,0);
+  const gB = new THREE.BufferGeometry(); gB.setAttribute('position', new THREE.BufferAttribute(aB,3)); gB.setDrawRange(0,0);
+  const gG = new THREE.BufferGeometry();
+  gG.setAttribute('position', new THREE.BufferAttribute(aG,3));
+  gG.setAttribute('aSize', new THREE.BufferAttribute(gSz,1));
+  gG.setAttribute('aAlpha', new THREE.BufferAttribute(gAl,1));
+  gG.setDrawRange(0,0);
+  const lineM = new THREE.LineBasicMaterial({ color: 0xf2f6ff, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthTest: false });
+  const brM   = new THREE.LineBasicMaterial({ color: 0xc9d4ef, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthTest: false });
+  const glowM = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: Object.assign({}, uni, { uPix:{value:renderer.getPixelRatio()}, uBoltA:{value:0} }),
+    vertexShader: [
+      'attribute float aSize, aAlpha; varying float vA;',
+      'uniform float uPix, uBoltA;',
+      'void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); vA = aAlpha * uBoltA;',
+      '  gl_PointSize = clamp(aSize * uPix * 620.0, 4.0, 76.0 * uPix); }',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float; varying float vA;',
+      'void main(){ float r = length(gl_PointCoord*2.0-1.0);',
+      '  float a = (1.0-smoothstep(0.05,1.0,r)) * vA * 0.16;',   /* soft halo, no bloom */
+      '  if (a < 0.004) discard; gl_FragColor = vec4(vec3(0.70,0.76,0.94)*a, a); }',
+    ].join('\n') });
+  const lnM = new THREE.LineSegments(gM, lineM); lnM.frustumCulled = false; fxScene.add(lnM);
+  const lnB = new THREE.LineSegments(gB, brM);   lnB.frustumCulled = false; fxScene.add(lnB);
+  const lnG = new THREE.Points(gG, glowM);       lnG.frustumCulled = false; fxScene.add(lnG);
+  function put(arr, geo, segs){
+    const n = Math.min(Math.floor(arr.length/6), Math.floor(segs.length/4));
+    for (let i = 0; i < n; i++){
+      arr[i*6]   = segs[i*4];     arr[i*6+1] = segs[i*4+1]; arr[i*6+2] = 0;
+      arr[i*6+3] = segs[i*4+2];   arr[i*6+4] = segs[i*4+3]; arr[i*6+5] = 0;
+    }
+    geo.attributes.position.needsUpdate = true; geo.setDrawRange(0, n * 2);
+  }
+  return { gM, gB, gG, lineM, brM, glowM, life: 0, span: 0.24,
+    set(segsMain, segsBranch, ptsGlow){
+      put(aM, gM, segsMain);
+      put(aB, gB, segsBranch);
+      const ng = Math.min(V, Math.floor(ptsGlow.length / 2));
+      for (let i = 0; i < ng; i++){
+        aG[i*3] = ptsGlow[i*2]; aG[i*3+1] = ptsGlow[i*2+1]; aG[i*3+2] = 0;
+        gSz[i] = 0.030 + (i % 3) * 0.013; gAl[i] = 0.60 + (i % 2) * 0.40;
+      }
+      gG.attributes.position.needsUpdate = true; gG.attributes.aSize.needsUpdate = true; gG.attributes.aAlpha.needsUpdate = true;
+      gG.setDrawRange(0, ng);
+    },
+    hide(){ gM.setDrawRange(0,0); gB.setDrawRange(0,0); gG.setDrawRange(0,0);
+      lineM.opacity = 0; brM.opacity = 0; glowM.uniforms.uBoltA.value = 0; } };
+}
+function buildBolt(){
+  if (!boltFx) return;
+  const main = [], branch = [], glow = [];
+  /* item 23: begin UNDER the cloud deck, drift with the wind, end at the sea */
+  let x = (Math.random()*2 - 1) * 0.42 + S.windX * 0.34 + S.boltDrift * 0.42;
+  x = Math.max(-0.88, Math.min(0.88, x));
+  let y = 0.42 + Math.random() * 0.26;
+  const yEnd = edgeNdc(x) + 0.008;                    /* the channel terminates on the water */
+  let dx = 0;
+  const steps = 9 + Math.floor(Math.random() * 5), dy = (y - yEnd) / steps;
+  for (let i = 0; i < steps && y > yEnd; i++){
+    dx = dx * 0.35 + (Math.random() - 0.5) * 0.10 + S.windX * 0.022;   /* wind drags the path */
+    /* stepped leader: alternate vertical drops and lateral jogs */
+    const ny = y - dy * (0.72 + Math.random() * 0.5);
+    const nx = x + dx * ((i % 2) ? 1.0 : 0.30);
+    main.push(x, y, nx, ny);
+    glow.push(nx, ny);
+    if (i > 1 && Math.random() < 0.42 && branch.length < 56){
+      let bx = nx, by = ny, bdx = (Math.random() - 0.5) * 0.16;
+      for (let j = 0; j < 3 && by > yEnd; j++){
+        const bnx = bx + bdx, bny = by - dy * 0.85;
+        branch.push(bx, by, bnx, bny);
+        bx = bnx; by = bny; bdx = bdx * 0.55 + (Math.random() - 0.5) * 0.12;
+      }
+    }
+    x = nx; y = ny;
+  }
+  /* guarantee ≥ 2 forked branches */
+  if (branch.length < 8){
+    for (let b = 0; b < 2; b++){
+      const o = Math.min((3 + b * 3) * 4, main.length - 4);
+      let bx = main[o+2], by = main[o+3], bdx = (b ? 1 : -1) * 0.10;
+      for (let j = 0; j < 3; j++){
+        const bnx = bx + bdx, bny = by - dy * 0.9;
+        branch.push(bx, by, bnx, bny);
+        bx = bnx; by = bny; bdx = bdx * 0.6 + (Math.random() - 0.5) * 0.06;
+      }
+    }
+  }
+  boltFx.set(main, branch, glow);
+  boltFx.span = 0.15 + Math.random() * 0.15;          /* 150-300 ms, instant on / hard off */
+  boltFx.life = boltFx.span;
+}
+function strikeLightning(){
+  S.flash = REDUCE ? 0.45 : 0.75 + Math.random() * 0.35;
+  S.dbl = Math.random() < 0.42 ? 0.08 + Math.random() * 0.12 : -1;   /* double flash */
+  /* item 23: the strike column wanders with the wind between flashes */
+  S.boltDrift = Math.max(-1, Math.min(1, S.boltDrift * 0.55 + S.windX * 0.7 + (Math.random() - 0.5) * 0.6));
+  FXSTAT.lightning++;
+  if (!REDUCE) buildBolt();
+}
+const WGREY = new THREE.Vector3();
+function applyWeather(dt){
+  S.storm += (S.stormT - S.storm) * Math.min(1, dt * 0.45);
+  const f = S.storm, up = D.el > 0.4;
+  /* item 22 — ONE global wind vector. Two slow sines + a base lean make gust
+     pressure wander; every consumer — rain slant/speed, crest skew, cloud
+     drift, whitecap advection, bolt placement — reads this same signed value. */
+  S.windX = Math.max(-1.15, Math.min(1.15,
+    f * (0.62 + 0.34 * Math.sin(S.t * 0.21) + 0.20 * Math.sin(S.t * 0.77 + 1.3))));
+  uni.uWindX.value = S.windX;
+  S.skew = 0.35 * f * Math.max(-1, Math.min(1, S.windX));    /* asymmetry sign = wind sign */
+  uni.uSkew.value = S.skew;
+  uni.uStorm.value = f;
+  uni.uWAmp.value = S.wamp = 1 + f * 1.6;   /* item 22: storm raises uWAmp to 2.6 (was 2.25);
+                                               JS twin reads S.wamp — cut stays glued */
+  uni.uWind.value = f;
+  uni.uCdev.value = 0.12 + 0.88 * f;        /* item 22: continuous cloud development 0..1 */
+  /* clouds thicken and grey out, but the sky keeps the HOUR's brightness */
+  uni.uCloudAmt.value = Math.min(1, D.ca + (1 - D.ca) * 0.92 * f);
+  const lum = 0.35 + 0.75 * Math.max(0.15, Math.min(1.15, D.si));
+  WGREY.set(0.40, 0.43, 0.50).multiplyScalar(lum);
+  uni.uCloudCol.value.copy(V3(D.cloud)).lerp(WGREY, f * 0.75);
+  uni.uZen.value.copy(V3(D.zen)).multiplyScalar(1 - 0.38 * f);
+  uni.uMidS.value.copy(V3(D.mid)).multiplyScalar(1 - 0.30 * f);
+  uni.uLow.value.copy(V3(D.low)).multiplyScalar(1 - 0.22 * f);
+  uni.uSunInt.value = Math.max(0, D.si) * (1 - 0.50 * f);
+  uni.uStar.value = D.star * (1 - 0.90 * f);
+  uni.uMoonInt.value = D.mi * (1 - 0.75 * f);
+  uni.uGlit.value = (up ? D.glit : Math.max(0.55, D.glit)) * (1 - 0.72 * f);
+  uni.uShaft.value = D.shaft * (1 - 0.55 * f);
+  uni.uUw.value = D.uw * (1 - 0.22 * f);
+  const rainA = Math.max(0, (f - 0.15)) / 0.85;
+  S.rainA = rainA;
+  uni.uRainAmt.value = rainA;               /* item 24: micro-ripple roughness in the sea */
+  /* item 21b: the streaks themselves are drawn by rainLayer — a DOM canvas
+     ABOVE the glass — so nothing occludes the storm. Slant/speed/density all
+     answer to S.windX / S.rainA, the same wind the waves and clouds follow. */
+  /* item 24 — rain hits the sea: crown splashes + rain rings, frequency and
+     amplitude rise with the rain rate; the old fleck kick stays underneath */
+  if (rainA > 0.25){
+    S.rainT -= dt * rainA;
+    if (S.rainT <= 0){
+      S.rainT = (0.14 + Math.random() * 0.26) / (0.55 + rainA * 0.9);
+      const cx = (Math.random()*2 - 1) * 0.95;
+      spawnRipple(cx, (0.22 + Math.random() * 0.40) * (0.5 + rainA), 7);   /* dir > 4 = rain ring */
+      FXSTAT.rainHits++;
+      if (ECO && crownFx) crownFx.emit(cx, 0.010 + Math.random() * 0.014, 0.5 + Math.random() * 0.45, CROWN_PROF);
+      if (ECO && splashFx && Math.random() < 0.35)
+        splashFx.emit(cx, 0.02, 0.30 * rainA, RAIN_PROF);
+    }
+  }
+  /* lightning: random, sparse — the flash matters more than the bolt.
+     S.flashK is a probe-only slow-motion dial (default 1) so a headless
+     screenshot taken seconds later can still land inside one strike. */
+  S.flash *= Math.exp(-dt * 4.6 * (S.flashK || 1));
+  if (S.dbl > 0){ S.dbl -= dt; if (S.dbl <= 0){ S.flash = Math.max(S.flash, 0.5 + Math.random() * 0.3); if (!REDUCE) buildBolt(); } }
+  uni.uFlash.value = Math.min(1, S.flash);
+  if (boltFx && boltFx.life > 0){
+    /* item 23: hard envelope. Branches SNAP off past 55% of the strike; the
+       core fades only in its last 12%; the halo rides the flash itself. */
+    boltFx.life -= dt;
+    const k = Math.max(0, boltFx.life / boltFx.span);
+    boltFx.lineM.opacity = (k > 0.12 ? 1 : k / 0.12);
+    boltFx.brM.opacity = (boltFx.life > boltFx.span * 0.55) ? 1 : 0;
+    boltFx.glowM.uniforms.uBoltA.value = 0.30 + 0.70 * uni.uFlash.value;
+    if (boltFx.life <= 0) boltFx.hide();
+  }
+  if (f > 0.12){
+    S.boltT -= dt * (0.25 + f);
+    if (S.boltT <= 0){ if (f > 0.3) strikeLightning(); S.boltT = (4 + Math.random() * 9) / (REDUCE ? 2 : 1); }
+  } else { S.boltT = 5 + Math.random() * 8; }
+  /* readable chrome: copy shadow follows the darker sky */
+  const l = Math.max(0, Math.min(1, (D.uw * (1 - 0.25 * f)) / 1.3)).toFixed(3);
+  if (l !== S.lumPrev){ S.lumPrev = l; document.documentElement.style.setProperty('--lum', l); }
+  if (S.dbg){ S.dbgT -= dt; if (S.dbgT <= 0){ S.dbgT = 0.12; S.dbg(); } }
+}
+const RAIN_PROF = { splash: 0.35, bubble: 0.20 };
+/* item 24: the crown emitter reuses the splash pool machinery — small, fast,
+   skirt-out droplets. FXSTAT.rainhit / rainhitTotal wire up by opts.name. */
+const CROWN_PROF = { splash: 1.0, bubble: 0 };
+crownFx = makeEmit({ name: 'rainhit', cap: MOBILE ? 200 : 520, kind: 1, perFrame: MOBILE ? 4 : 8, crown: true });
+boltFx = makeBolt();
+
+/* ═════════════ 6b³ · item 21b — rain ABOVE the glass ═════════════
+   A WebGL raindrop can never occlude a DOM card, and the old clip stopped
+   streaks at the CARD-INFLUENCED waterline. So the storm gets its own
+   screen-space layer painted over <main>, stopping at the calm OPEN-SEA line
+   only. Slant, speed and density read S.windX / S.rainA — the same global
+   wind the waves and clouds answer to (item 22). Drawn after the GL composite
+   pass on a compositor layer above the glass: rain pixels always win. */
+const rainLayer = (() => {
+  const cv = document.getElementById('rainfall');
+  const ctx = cv.getContext('2d');
+  const scale = Math.min(devicePixelRatio || 1, 1.5);
+  const NE = 64;
+  const eLine = new Float32Array(NE + 1);
+  let W = 2, H = 2, drops = [], active = 0;
+  function mkD(ySpawn){
+    const z = 0.18 + Math.random() * 0.82;               /* 0 far · 1 near */
+    return { x: Math.random() * 1.3 * S.W - 0.15 * S.W, y: ySpawn, z,
+             thr: 0.06 + Math.random() * 0.9, ph: Math.random() * 6.283 };
+  }
+  function resize(){
+    W = cv.width = Math.max(2, Math.round(S.W * scale));
+    H = cv.height = Math.max(2, Math.round(S.H * scale));
+    const target = Math.max(140, Math.min(MOBILE ? 420 : 1100,
+      Math.round(S.W * S.H / (MOBILE ? 5200 : 3200))));
+    drops = [];
+    for (let i = 0; i < target; i++) drops.push(mkD(Math.random() * S.H));
+  }
+  function edgeAt(pxX){                                  /* calm sea line in CSS px */
+    const i = Math.max(0, Math.min(NE, (pxX / S.W) * NE));
+    const i0 = Math.floor(i), i1 = Math.min(NE, i0 + 1);
+    const a = eLine[i0], b = eLine[i1];
+    return a + (b - a) * (i - i0);
+  }
+  function frame(dt){
+    const rainA = S.rainA;
+    if (rainA < 0.02){ if (cv.style.display !== 'none') cv.style.display = 'none'; active = 0; return; }
+    if (cv.style.display !== 'block') cv.style.display = 'block';
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.clearRect(0, 0, S.W, S.H);
+    for (let i = 0; i <= NE; i++)
+      eLine[i] = pxYofNdc(edgeNdc(ndcXof((i / NE) * S.W), true));   /* calm = no card meniscus */
+    const wind = S.windX;
+    const bright = 0.30 + 0.70 * Math.max(0.15, Math.min(1.2, D.uw));
+    active = 0;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < drops.length; i++){
+      const d = drops[i];
+      if (d.thr > rainA) continue;                       /* density follows the rain rate */
+      active++;
+      const vy = (430 + 560 * d.z) * (0.78 + 0.34 * rainA) * (1 + 0.20 * Math.abs(wind));
+      const vx = wind * (95 + 165 * d.z);
+      if (!REDUCE){ d.y += vy * dt; d.x += vx * dt; }
+      const L = (0.030 + 0.075 * d.z) * S.H * (0.70 + 0.45 * rainA);
+      const vl = Math.hypot(vx, vy) || 1;
+      if (d.x < -0.25 * S.W || d.x > 1.25 * S.W || d.y > S.H + 60){
+        d.x = Math.random() * 1.2 * S.W - 0.1 * S.W; d.y = -L - Math.random() * S.H * 0.2; continue;
+      }
+      const e = edgeAt(d.x);
+      if (d.y >= e - 1){                                 /* lands on the OPEN SEA — never a card */
+        d.x = Math.random() * 1.2 * S.W - 0.1 * S.W; d.y = -Math.random() * S.H * 0.15 - 4; continue;
+      }
+      const px = d.x + S.mx * (2 + 4 * (1 - d.z));       /* ≤6 px mouse parallax (item 22) */
+      const a = (0.10 + 0.30 * d.z) * Math.min(1, rainA * 1.5) * bright;
+      ctx.strokeStyle = 'rgba(176,193,212,' + a.toFixed(3) + ')';
+      ctx.lineWidth = 0.55 + 1.55 * d.z;
+      ctx.beginPath();
+      ctx.moveTo(px - (vx / vl) * L, d.y - (vy / vl) * L);
+      ctx.lineTo(px, d.y);
+      ctx.stroke();
+    }
+  }
+  resize();
+  return { frame, resize, stats(){ return { drops: drops.length, active, rainA: S.rainA }; } };
+})();
+/* ═════════════ 6c · sky life — distant birds, occasional shooting stars ═════════════
+   Screen-space as well: the horizon is a screen line, so anything that must stay
+   above it has to be placed in screen space. Silhouettes only — no bloom. */
+function makeSkyLife(opts) {
+  const CAP = opts.cap;
+  const px = new Float32Array(CAP * 3), sz = new Float32Array(CAP),
+        ph = new Float32Array(CAP), kd = new Float32Array(CAP), al = new Float32Array(CAP);
+  const st = new Float32Array(CAP);                       /* life / state */
+  for (let i = 0; i < CAP; i++) {
+    px[i * 3] = Math.random() * 2 - 1;
+    px[i * 3 + 1] = 0.18 + Math.random() * 0.62;
+    px[i * 3 + 2] = 0;
+    sz[i] = opts.sMin + Math.random() * (opts.sMax - opts.sMin);
+    ph[i] = Math.random() * 6.283; kd[i] = opts.kind; al[i] = 0; st[i] = Math.random();
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(px, 3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(sz, 1));
+  g.setAttribute('aPhase', new THREE.BufferAttribute(ph, 1));
+  g.setAttribute('aKind', new THREE.BufferAttribute(kd, 1));
+  g.setAttribute('aAlpha', new THREE.BufferAttribute(al, 1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false,
+    blending: opts.kind === 3 ? THREE.AdditiveBlending : THREE.NormalBlending,
+    uniforms: Object.assign({}, uni, { uPix: { value: renderer.getPixelRatio() }, uDay: { value: 1 } }),
+    vertexShader: [
+      'attribute float aSize, aPhase, aKind, aAlpha;',
+      'varying float vA, vK, vPh;',
+      'uniform float uPix, uTime, uDay;',
+      'void main(){',
+      '  vec2 p = position.xy;',
+      '  float sp = 0.009 + aSize * 0.05;',
+      '  if (aKind < 2.5){',
+      '    p.x = mod(p.x + uTime * sp * aPhase + 1.0, 2.4) - 1.2;',
+      '    p.y += sin(uTime * 0.35 + aPhase) * 0.010;',
+      '  }',
+      '  gl_Position = vec4(p, 0.0, 1.0);',
+      '  vPh = aPhase; vK = aKind;',
+      '  vA = aAlpha * (aKind < 2.5 ? uDay : 1.0);',
+      '  gl_PointSize = clamp(aSize * uPix * (aKind < 2.5 ? 260.0 : 300.0), 2.0, 88.0 * uPix);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'varying float vA, vK, vPh;',
+      'uniform float uTime;',
+      'void main(){',
+      '  vec2 q = gl_PointCoord * 2.0 - 1.0;',
+      '  float a;',
+      '  vec3 col;',
+      '  if (vK > 2.5){',
+      '    /* meteor: a short tapering streak, no glow */',
+      '    float life = min(vA, 1.25);',
+      '    float along = clamp(q.x * 0.78 + q.y * 0.62, -1.0, 1.0);',
+      '    float across = abs(q.x * 0.62 - q.y * 0.78);',
+      '    float h = (along + 1.0) * 0.5;                  /* 0 tail -> 1 head */',
+      '    float taper = pow(h, 2.4);',
+      '    float w = 0.045 + 0.115 * h;',
+      '    float cap = 1.0 - smoothstep(0.86, 1.0, h);',
+      '    a = (1.0 - smoothstep(0.0, w, across)) * taper * cap * life;',
+      '    col = vec3(0.94, 0.96, 1.00);',
+      '  } else {',
+      '    /* gull silhouette: two wings, one wing-beat per cycle, gliding between */',
+      '    float cyc = fract(uTime * 0.42 + vPh);',
+      '    float beat = cyc < 0.42 ? sin(cyc / 0.42 * 3.1416) : 0.12;',
+      '    float w = abs(q.x);',
+      '    float y0 = 0.10 - w * w * 0.55 - beat * (1.0 - w) * 0.55;',
+      '    float body = 1.0 - smoothstep(0.0, 0.16, abs(q.y - y0) + w * 0.05);',
+      '    float torso = 1.0 - smoothstep(0.0, 0.20, length(vec2(q.x / 0.22, (q.y + 0.02) / 0.09)));',
+      '    a = max(body, torso * 0.9) * smoothstep(1.0, 0.55, w) * vA;',
+      '    col = vec3(0.05, 0.08, 0.12);',
+      '  }',
+      '  if (a < 0.006) discard;',
+      '  gl_FragColor = vec4(col * a, a);',
+      '}',
+    ].join('\n'),
+  });
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false;
+  fxScene.add(pts);
+  /* meteors: dormant at first, then rare */
+  if (opts.kind > 2.5) for (let i = 0; i < CAP; i++) st[i] = opts.quick ? 0.05 + i * 0.5 : 1.5 + Math.random() * 3.5;
+  return {
+    mat,
+    step(dt, t) {
+      let busy = 0;
+    for (let i = 0; i < CAP; i++) {
+        if (opts.kind > 2.5) {
+          /* meteors: dormant until the clock says now, then a brief arc */
+          st[i] -= dt;
+          if (st[i] > 0) { al[i] = 0; continue; }
+          if (st[i] > -2.6) {                    /* 1.1 s -> 2.6 s, readable */
+            const k = 1 - Math.abs(st[i] + 1.3) / 1.3;
+            const f = Math.max(0, k);
+            al[i] = f * f * (3.0 - 2.0 * f) * 1.3;   /* smooth in/out */
+            FXSTAT.meteor = Math.max(FXSTAT.meteor, al[i]);
+            px[i * 3] += dt * 0.21; px[i * 3 + 1] -= dt * 0.17;   /* slower still */
+            busy = 1;
+          } else {
+            st[i] = 4 + Math.random() * 8;            /* per-slot pause 4-12 s; two slots keep the sky alive */
+            px[i * 3] = -0.9 + Math.random() * 1.3;
+            px[i * 3 + 1] = 0.35 + Math.random() * 0.55;
+            al[i] = 0;
+          }
+          continue;
+        }
+        al[i] = opts.alpha[i];
+        busy = 1;
+      }
+      g.attributes.aAlpha.needsUpdate = true;
+      if (busy && opts.kind > 2.5) g.attributes.position.needsUpdate = true;
+    },
+  };
+}
+
+/* ═════════════ 6c² · item 21c — the flock is ONE animal ═════════════
+   5 birds (3 on mobile) fly as a single V: the CPU steers one leader position
+   and every wing-mate sits behind its arm; the tip wing-beat is delayed about
+   half a cycle from the centre; the whole flock periodically HOLDS its wings
+   and glides (a stationary pose — not a slow flap). The flight floor is the
+   live sea cut: when the line rises (mouse up, sink, bigger waves) the flock
+   rises with it and never overlaps the water. */
+const FLOCKN = MOBILE ? 3 : 5;
+const flock = { x: -0.42, dir: 1, spd: 0.055, wander: 0.9, glide: false, nextFlip: 2.6 + Math.random() * 3 };
+function makeFlock(){
+  const CAP = FLOCKN;
+  const px = new Float32Array(CAP*3), sz = new Float32Array(CAP),
+        ph = new Float32Array(CAP), gl = new Float32Array(CAP), al = new Float32Array(CAP);
+  for (let i = 0; i < CAP; i++){
+    const row = i === 0 ? 0 : Math.ceil(i/2);
+    ph[i] = row * 0.5;                      /* tip lags the centre by ~half a beat */
+    al[i] = 0.90 - row * 0.10;
+    gl[i] = 0;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(px,3));
+  g.setAttribute('aSize', new THREE.BufferAttribute(sz,1));
+  g.setAttribute('aPhase', new THREE.BufferAttribute(ph,1));
+  g.setAttribute('aGlide', new THREE.BufferAttribute(gl,1));
+  g.setAttribute('aAlpha', new THREE.BufferAttribute(al,1));
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthTest: false, depthWrite: false, blending: THREE.NormalBlending,
+    uniforms: Object.assign({}, uni, { uPix:{value:renderer.getPixelRatio()}, uDay:{value:0} }),
+    vertexShader: [
+      'attribute float aSize, aPhase, aGlide, aAlpha;',
+      'varying float vA, vG, vPh;',
+      'uniform float uPix, uDay, uTime;',
+      'void main(){',
+      '  vec2 p = position.xy;',
+      '  p.y += sin(uTime*0.45 + aPhase*5.1)*0.005;',           /* per-bird altitude bob */
+      '  gl_Position = vec4(p, 0.0, 1.0);',
+      '  vPh = aPhase; vG = aGlide;',
+      '  vA = aAlpha * uDay;',
+      '  gl_PointSize = clamp(aSize * uPix * 620.0, 10.0, 72.0 * uPix);',
+      '}'].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'varying float vA, vG, vPh;',
+      'uniform float uTime;',
+      'void main(){',
+      '  /* silhouette gull: two swept wings + body. beat swings the wing tip',
+      '     through an up-down arc at 2.4-3.8 Hz; when gliding (vG→1) the wings',
+      '     HOLD at beat 0.06 — a still pose, no flap. Pure dark silhouette. */',
+      '  vec2 q = gl_PointCoord * 2.0 - 1.0;',
+      '  float flapHz = 2.4 + fract(vPh * 1.618) * 1.4;',
+      '  float cyc = fract(uTime * flapHz + vPh);',
+      '  float beat = mix(sin(cyc * 6.28318), 0.06, vG);',
+      '  float w = abs(q.x);',
+      '  if (w > 0.96) discard;',
+      '  float wy = pow(w, 1.55) * (0.16 + beat * 0.58) + beat * 0.10 * w - 0.05;',
+      '  float th = mix(0.26, 0.09, w);                          /* root thick, tip thin */',
+      '  float wing = 1.0 - smoothstep(th * 0.40, th, abs(q.y - wy));',
+      '  float body = 1.0 - smoothstep(0.0, 0.135, length(vec2(q.x / 0.34, (q.y + 0.05) / 0.10)));',
+      '  float a = max(wing * 0.95, body) * smoothstep(0.96, 0.82, w) * vA;',
+      '  if (a < 0.006) discard;',
+      '  gl_FragColor = vec4(vec3(0.045, 0.070, 0.105) * a, a);  /* no bloom, ever */',
+      '}'].join('\n'),
+  });
+  const pts = new THREE.Points(g, mat);
+  pts.frustumCulled = false; fxScene.add(pts);
+  return {
+    mat, g,
+    step(dt, dayF){
+      if (dayF <= 0.02){ for (let i=0;i<CAP;i++) al[i]=0; g.attributes.aAlpha.needsUpdate = true; return; }
+      /* the whole flock alternates flap / glide; tips ease in a touch later */
+      flock.nextFlip -= dt;
+      if (flock.nextFlip <= 0){ flock.glide = !flock.glide;
+        flock.nextFlip = flock.glide ? 1.3 + Math.random()*1.8 : 2.4 + Math.random()*4.2; }
+      flock.x += flock.dir * flock.spd * dt * (flock.glide ? 1.3 : 1);    /* gliding is faster */
+      if (flock.x > 1.6) flock.x = -1.6;
+      if (flock.x < -1.6) flock.x = 1.6;
+      /* the flight floor is tied to BOTH lines: the horizon and the live sea
+         cut — the flock owns the SKY band, and rises when either rises */
+      let e = -1;
+      for (let k = -2; k <= 2; k++) e = Math.max(e, edgeNdc(Math.max(-0.98, Math.min(0.98, flock.x + k*0.07))));
+      flock.wander += dt * 0.32;
+      const hor = HORIZON + S.sink * 0.55;                       /* the shader's horizon */
+      const alt = 0.055 + 0.040*Math.sin(flock.wander) + 0.014*Math.sin(flock.wander*2.13+1.4);
+      const baseY = Math.min(0.86, Math.max(hor + 0.050 + alt, e + 0.075));
+      for (let i = 0; i < CAP; i++){
+        const row = i === 0 ? 0 : Math.ceil(i/2);
+        const arm = i === 0 ? 0 : (i % 2 ? 1 : -1) * row;       /* V opens behind the leader */
+        px[i*3]   = flock.x - flock.dir * row * 0.085;
+        px[i*3+1] = Math.max(baseY + arm * 0.048 + row * 0.010, e + 0.072, hor + 0.045);
+        px[i*3+2] = 0;
+        sz[i] = i === 0 ? 0.052 : 0.044 - (row-1)*0.006;
+        al[i] = 0.95 - row * 0.08;
+        const rate = 3.2 - row * 0.6;
+        gl[i] = flock.glide ? Math.min(1, gl[i] + dt*rate) : Math.max(0, gl[i] - dt*rate*0.8);
+      }
+      g.attributes.position.needsUpdate = true;
+      g.attributes.aSize.needsUpdate = true;
+      g.attributes.aAlpha.needsUpdate = true;
+      g.attributes.aGlide.needsUpdate = true;
+    },
+  };
+}
+let flock3 = null, meteors = null;
+if (ECO) {
+  flock3 = makeFlock();
+  meteors = makeSkyLife({ cap: 2, kind: 3, sMin: 0.55, sMax: 0.85,   /* bigger, max two at a time */
+    quick: Q.get('probe') === '4' });
+}
+
+/* ═════════════ 7 · waterline engine → mask + surface disturbance ═════════════ */
+const SAMPLES = MOBILE ? 8 : 14;
+const wls = [...document.querySelectorAll('.wl')].map((node)=>{
+  const air = node.querySelector('.wl-air'), sub = node.querySelector('.wl-sub');
+  const src = air.querySelector('.wl-in');
+  if (src && !sub.querySelector(':scope > .wl-in')) {
+    const c = src.cloneNode(true); c.setAttribute('aria-hidden','true');
+    sub.insertBefore(c, sub.firstChild);
+  }
+  return { node, air, sub, refl: node.dataset.refl==='1' ? node.querySelector('.wl-refl') : null,
+           top:0, crossing:false, sub0:0, deep:0, wet:0, impact:0, ripCool:0, parked:0,
+           focus: node.matches('[data-refl], .wl:not(.wl--bare)') };
+});
+
+function polyAir(pts){ let s='polygon(-3% -8%, 103% -8%';
+  for(let i=pts.length-1;i>=0;i--) s+=', '+((i/(pts.length-1))*106-3).toFixed(1)+'% '+pts[i].toFixed(1)+'%';
+  return s+')'; }
+function polySub(pts){ let s='polygon(';
+  for(let i=0;i<pts.length;i++) s+=((i/(pts.length-1))*106-3).toFixed(1)+'% '+pts[i].toFixed(1)+'%, ';
+  return s+'103% 108%, -3% 108%)'; }
+
+const live = { n:-1, map:{} };
+function liveAll(){
+  const nodes = document.querySelectorAll('[data-live]');
+  if (nodes.length === live.n) return;
+  live.n = nodes.length; live.map = {};
+  nodes.forEach(n => { (live.map[n.dataset.live] ||= []).push(n); });
+}
+const setLive=(k,v)=>{const a=live.map[k];if(a)for(const n of a)n.textContent=v;};
+const setBar=(k,v)=>{const a=live.map[k];if(a)for(const n of a)n.style.width=Math.max(0,Math.min(100,v*100)).toFixed(1)+'%';};
+
+/* Item 4 — water must react differently to a headline than to a panel.
+   Derived from measured size and visual weight, not hard-coded CSS classes. */
+function profileOf(r, bare) {
+  const w = r.width, rel = (r.width * r.height) / (S.W * S.H), wide = w / S.W;
+  /* grade by measured size + visual weight; bare type displaces far less */
+  let tier, base;
+  if (w < 120) { tier = 0; base = 0.18; }        // tiny: badge, tag, button
+  else if (w < 240) { tier = 1; base = 0.34; }    // small
+  else if (w < 470) { tier = 2; base = 0.55; }    // medium: card
+  else if (w < 760) { tier = 3; base = 0.78; }    // large: panel
+  else { tier = 4; base = 0.95; }                 // hero: full-width block
+  const areaLift = Math.min(0.14, rel * 1.5);
+  let mass = Math.max(0.10, Math.min(1, base + areaLift)) * (bare ? 0.45 : 1);
+  return {
+    tier, mass,
+    amp:     0.22 + mass * 1.15,
+    ripple:  0.18 + Math.pow(mass, 1.5) * 1.7,
+    ripples: tier === 0 ? 1 : tier === 1 ? 2 : tier === 2 ? 3 : tier === 3 ? 5 : 7,
+    splash:  0.12 + Math.pow(mass, 1.7) * 2.1,
+    bubble:  0.18 + mass * 1.5,
+    foam:    tier >= 3 ? 1 : tier === 2 ? 0.4 : 0.12,
+    wet:     0.35 + mass * 1.0,
+    wetTime: 900 + Math.round(mass * 1400),
+    refract: (wide < 0.14 ? 0.6 : 1) * (0.75 + mass * 0.6),
+  };
+}
+
+function spawnRipple(cx, amp, dir){
+  const t = S.t;
+  FXSTAT.ripples++;
+  const old = S.rips.findIndex(r => t - r.t0 > 2.8);
+  if (old >= 0) S.rips.splice(old, 1);
+  if (S.rips.length >= 6) S.rips.shift();
+  S.rips.push({ cx, amp, t0: t, dir });
+}
+
+let lastRead = 0, maskDirty = false;
+function sizeTargets(){
+  const w = Math.max(2, Math.round(S.W * DPR * rtScale)), h = Math.max(2, Math.round(S.H * DPR * rtScale));
+  if (rtSea.width !== w || rtSea.height !== h) rtSea.setSize(w, h);
+  const mw = Math.max(2, Math.round(S.W * maskScale)), mh = Math.max(2, Math.round(S.H * maskScale));
+  if (maskCv.width !== mw || maskCv.height !== mh){ maskCv.width = mw; maskCv.height = mh; }
+  maskTex.needsUpdate = true;
+}
+sizeTargets();
+
+function updateWaterline(dt){
+  S.boxes.length = 0;
+  const now = performance.now();
+  let focusPx = 0, maxSub = 0, maxWet = 0, maxDeep = 0, anyHalf = false, active = 0;
+
+  maskCtx.setTransform(1,0,0,1,0,0);
+  maskCtx.clearRect(0,0,maskCv.width,maskCv.height);
+  maskCtx.globalCompositeOperation = 'lighter';
+  const kx = maskCv.width / S.W, ky = maskCv.height / S.H;
+
+  for (const el of wls){
+    const vis = el.node.checkVisibility ? el.node.checkVisibility({opacityProperty:true,visibilityProperty:true}) : true;
+    const r = el.node.getBoundingClientRect();
+    if (!vis || r.height < 3 || r.bottom < -240 || r.top > S.H + 240){
+      if (el.crossing){ el.sub.classList.remove('crossing'); el.crossing = false; }
+      el.sub0 = el.deep = el.wet = 0;
+      const z = el.node.style;
+      z.setProperty('--sub','0'); z.setProperty('--deep','0'); z.setProperty('--wet','0'); z.setProperty('--refl','0');
+      continue;
+    }
+    const h = r.height, pts = new Array(SAMPLES);
+    el.prof = profileOf(r, el.node.classList.contains('wl--bare'));
+    let sum = 0;
+    for (let i=0;i<SAMPLES;i++){
+      const pxX = r.left + (i/(SAMPLES-1))*r.width;
+      const v = ((edgePx(pxX) - r.top)/h)*100;
+      pts[i] = Math.max(-8, Math.min(108, v));
+      sum += 1 - Math.max(0, Math.min(1, pts[i]/100));
+    }
+    const sub = Math.max(0, Math.min(1, sum/SAMPLES));
+    const mid = SAMPLES>>1;
+    const cutPx = Math.max(-h, Math.min(h*1.6, pts[mid]*h/100));
+    const edgeC = edgePx(r.left + r.width*0.5);
+    const deep = Math.max(0, Math.min(1, (r.top + h*0.5 - edgeC)/(S.H*0.60)));
+    const wet = sub > 0.001 && sub < 0.999 ? Math.pow(1 - Math.abs(sub*2 - 1), 0.85) : 0;
+
+    /* only rebuild the polygons when the cut actually moved, or the element is
+       newly parked fully in/out — a cheap but very effective frame saving */
+    const parked = sub <= 0.0005 ? -1 : sub >= 0.9995 ? 1 : 0;
+    if (parked !== 0 ? el.parked !== parked : true) {
+      el.air.style.clipPath = polyAir(pts);
+      el.sub.style.clipPath = polySub(pts);
+      el.parked = parked;
+    }
+    const st = el.node.style;
+    st.setProperty('--sub',sub.toFixed(3)); st.setProperty('--deep',deep.toFixed(3));
+    st.setProperty('--wet',(wet * el.prof.wet).toFixed(3)); st.setProperty('--cut',cutPx.toFixed(1)+'px');
+    st.setProperty('--h',h.toFixed(0)+'px');
+    const slope = pts[Math.min(SAMPLES-1,mid+1)] - pts[Math.max(0,mid-1)];
+    st.setProperty('--bend',(slope*0.4*el.prof.refract).toFixed(2));
+    if (el.refl){
+      const rv = sub < 0.03 ? 0 : 0.30*Math.min(1,sub/0.2)*Math.max(0,1-Math.max(0,(sub-0.8)/0.2));
+      st.setProperty('--refl', rv.toFixed(3));
+    }
+
+    /* ---- screen-space refraction mask: R covered, G depth, B transition ---- */
+    if (sub > 0.004){
+      active++;
+      maskCtx.beginPath();
+      let started = false;
+      for (let i=0;i<SAMPLES;i++){
+        const px = (r.left + (i/(SAMPLES-1))*r.width) * kx;
+        const py = (r.top + (pts[i]/100)*h) * ky;
+        if (!started){ maskCtx.moveTo(px,py); started = true; } else maskCtx.lineTo(px,py);
+      }
+      maskCtx.lineTo(r.right * kx, r.bottom * ky);
+      maskCtx.lineTo(r.left * kx, r.bottom * ky);
+      maskCtx.closePath();
+      maskCtx.fillStyle = 'rgb(255,'+Math.round(deep*255)+','+Math.round(wet*255)+')';
+      maskCtx.fill();
+      maskDirty = true;
+    }
+
+    const wantCross = wet > 0.16;
+    if (wantCross !== el.crossing){ el.sub.classList.toggle('crossing', wantCross); el.crossing = wantCross; }
+
+    const vel = (r.top - el.top)/Math.max(dt,0.001);
+    el.top = r.top;
+
+    /* meniscus curl while straddling, plus a ripple when it breaks the surface */
+    if (wet > 0.05 && S.boxes.length < 8){
+      const cx = ndcXof(r.left + r.width*0.5);
+      const hw = Math.max(0.05, Math.abs(ndcXof(r.left + r.width) - cx));
+      const dir = vel > 14 ? -1 : vel < -14 ? 1 : 0.45;
+      const m = el.prof.mass;
+      S.boxes.push({ cx, hw, amp:(0.0022 + wet*0.0052) * el.prof.amp * m, dir });
+    }
+        /* item 8 — an object leaving the water comes out wet */
+    if (!el.beads && !el.node.classList.contains('wl--bare')) {
+      el.beads = document.createElement('span');
+      el.beads.className = 'wl-beads';
+      for (let i = 0; i < 11; i++) {
+        const b = document.createElement('i');
+        const w = 3 + Math.random() * 6;
+        b.style.cssText = 'left:' + (5 + Math.random() * 88).toFixed(1) + '%;width:' + w.toFixed(1) +
+          'px;height:' + (w * (1.5 + Math.random() * 1.3)).toFixed(1) + 'px;animation-delay:' +
+          (Math.random() * 0.5).toFixed(2) + 's';
+        el.beads.appendChild(b);
+      }
+      el.node.appendChild(el.beads);
+    }
+    /* remember recent submersion for a short window — the old test demanded a
+       12%-of-height jump inside one frame, which normal scroll never produces */
+    if (el.sub0 > 0.10) el.deepSeen = 0.5;
+    else if (el.deepSeen > 0) el.deepSeen -= dt;
+    if (el.deepSeen > 0 && sub <= 0.03 && vel < -8 && !el.node.classList.contains('dripping')) {
+      el.deepSeen = 0;
+      FXSTAT.drips++;
+      el.node.classList.add('dripping');
+      setTimeout(() => el.node.classList.remove('dripping'), 1800);
+    }
+
+    /* impact = how fast the surface is being pierced, per second. Measuring a
+       rate makes slow scrolls and fast flicks behave alike. */
+    const dSub = Math.abs(sub - (el.prevSub === undefined ? sub : el.prevSub)) / Math.max(dt, 0.001);
+    el.prevSub = sub;
+    const impact = Math.max(0, Math.min(1, dSub * 1.35)) * el.prof.mass;
+    el.impact = impact;
+    st.setProperty('--impact', impact > 0.18 ? impact.toFixed(3) : '0');
+    if (impact > 0.02){
+      const cx = ndcXof(r.left + r.width * 0.5);
+      const dir = vel > 0 ? 1 : -1;                       /* 1 sinking, -1 rising */
+      if (impact > 0.12 && !el.onLine){
+        el.onLine = true;
+        /* a wide panel is not one point of contact: spread sources across the
+           line so the disturbance reads as an object entering the water */
+        const n = el.prof.ripples;
+        for (let k = 0; k < n; k++) {
+          const u = n === 1 ? 0 : (k / (n - 1)) * 2 - 1;
+          const amp = Math.min(1.5, 0.42 + impact * 1.5) * el.prof.ripple * (1 - Math.abs(u) * 0.35);
+          spawnRipple(cx + u * Math.max(0.02, Math.abs(ndcXof(r.left + r.width) - cx)) * 0.78, amp, dir);
+        }
+      } else if (impact < 0.06) el.onLine = false;
+      if (ECO && impact > 0.035 && el.ripCool <= 0 && splashFx && bubbleFx){
+        el.ripCool = 0.20;
+        const wNdc = Math.max(0.02, Math.abs(ndcXof(r.left + r.width) - cx));
+        splashFx.emit(cx, wNdc, impact, el.prof);
+        bubbleFx.emit(cx, wNdc, impact, el.prof);
+      }
+    }
+
+    if (el.focus && sub > 0.02) focusPx = Math.max(focusPx, (r.top + h*0.5) - edgeC);
+    maxSub = Math.max(maxSub,sub); maxWet = Math.max(maxWet,wet); maxDeep = Math.max(maxDeep,deep);
+    if (wet > 0.25) anyHalf = true;
+    el.sub0 = sub; el.deep = deep; el.wet = wet;
+    if (el.ripCool > 0) el.ripCool -= dt;
+  }
+
+  if (active || maskDirty){ maskTex.needsUpdate = true; maskDirty = !!active; }
+
+  if (now - lastRead > 120){
+    lastRead = now; liveAll();
+    const d = Math.max(0, focusPx)/PX_PER_M;
+    setLive('depth', d.toFixed(1));
+    setLive('state', maxSub < 0.04 ? 'Above water' : anyHalf ? 'Crossing surface' : maxSub > 0.94 ? 'Submerged' : 'Entering water');
+    setLive('index', (1.00029 + (1.333-1.00029)*maxSub).toFixed(5));
+    setLive('temp', (17.4 - 11.6*(1-Math.exp(-d/21))).toFixed(1)+'°C');
+    setLive('rPct', (Math.exp(-d/3.4)*100).toFixed(0)+'%');
+    setLive('bPct', (Math.exp(-d/26)*100).toFixed(0)+'%');
+    setBar('bR', Math.exp(-d/3.4)); setBar('bB', Math.exp(-d/26));
+    setBar('barDepth', Math.min(1, d/18));
+  }
+}
+
+/* ═════════════ 8 · ScrollTrigger: owns progress + 2D reveals + UI micro ═════════════ */
+const pbar = document.getElementById('pbar');
+let lastClk = 0;
+function applyDay(){
+  dayAt(S.p);
+  uni.uSunDir.value.copy(dirFrom(D.el, D.az));
+  uni.uSunCol.value.copy(V3(D.sun)); uni.uSunInt.value = Math.max(0, D.si);
+  uni.uMoonDir.value.copy(dirFrom(D.me, D.ma)); uni.uMoonInt.value = D.mi;
+  const sunUp = D.el > 0.4;
+  uni.uLightDir.value.copy(sunUp ? uni.uSunDir.value : uni.uMoonDir.value);
+  if (sunUp) uni.uLightCol.value.copy(uni.uSunCol.value); else uni.uLightCol.value.set(0.74,0.82,0.96);
+  uni.uLightInt.value = sunUp ? Math.max(0.15,D.si) : Math.max(0.12,D.mi);
+  uni.uLightNdc.value.set(sunUp ? D.az : D.ma, Math.tan((sunUp?D.el:D.me)*Math.PI/180));
+  /* moonlight throws a narrow, cold path; sunlight a broad warm one */
+  uni.uPathW.value = sunUp ? 2.6 : 7.0;   /* a cold, narrow mirror road */
+  /* keep a cold, narrow moon-glitter floor so the night sea still shimmers */
+  if (!sunUp) uni.uGlit.value = Math.max(0.55, D.glit);
+  uni.uZen.value.copy(V3(D.zen)); uni.uMidS.value.copy(V3(D.mid)); uni.uLow.value.copy(V3(D.low));
+  uni.uAmb.value.copy(V3(D.amb)); uni.uAmbInt.value = D.ai; uni.uStar.value = D.star;
+  uni.uCloudCol.value.copy(V3(D.cloud)); uni.uCloudAmt.value = D.ca;
+  uni.uWDeep.value.copy(V3(D.wd)); uni.uWShal.value.copy(V3(D.ws));
+  uni.uUw.value = D.uw; uni.uShaft.value = D.shaft; uni.uGlit.value = D.glit;
+  /* items 17/18/20 — the interface must stay readable at 00:40 as well as noon,
+     so copy shadow and glass density follow the same light the sea does */
+  document.documentElement.style.setProperty('--lum', Math.max(0, Math.min(1, D.uw / 1.3)).toFixed(3));
+
+  const mins = ((D.clk % 1440) + 1440) % 1440;
+  const clock = String(Math.floor(mins/60)).padStart(2,'0') + ':' + String(Math.floor(mins%60)).padStart(2,'0');
+  setLive('clock', clock); setLive('phase', D.name);
+  document.getElementById('clk').textContent = clock;
+  document.getElementById('phase').textContent = D.name;
+  setLive('elev', (D.el>=0?'+':'−') + Math.abs(D.el).toFixed(1) + '°');
+  setBar('barElev', Math.max(0, Math.min(1, (D.el+26)/86)));
+  setLive('sky', Math.round(Math.max(0.02,D.si)*100)+'%');
+  setBar('barSky', Math.max(0.02,D.si));
+  setLive('uw', Math.round(D.uw/1.3*100)+'%');
+  setLive('gi', D.glit.toFixed(2));
+}
+
+ScrollTrigger.create({
+  start: 0, end: () => document.documentElement.scrollHeight - innerHeight,
+  onUpdate: (self) => { S.tgt = self.progress; },
+});
+
+/* Only start hidden if the element is below the fold. Anything the visitor sees
+   on load is already visible — a reveal system must be able to fail without
+   taking the page's copy down with it. */
+const belowFold = [...document.querySelectorAll('.rv,.rvb')]
+  .filter((el) => el.getBoundingClientRect().top > innerHeight * 0.92);
+gsap.set(belowFold, { opacity:0, y:40 });
+gsap.set(belowFold.filter((el) => el.classList.contains('rvb')), { filter:'blur(8px)' });
+if (REDUCE){
+  gsap.set(belowFold, { opacity:1, y:0, filter:'blur(0px)' });
+} else {
+  const batch = (sel, extra) => ScrollTrigger.batch(belowFold.filter((el) => el.matches(sel)), {
+    start:'top 88%', once:true,
+    onEnter:(b)=>gsap.to(b, Object.assign({opacity:1,y:0,duration:1.05,ease:'power2.out',stagger:.08,overwrite:true}, extra||{})),
+  });
+  batch('.rv'); batch('.rvb', { filter:'blur(0px)', duration:1.15 });
+  /* fail-safe: copy must never stay invisible because a reveal did not fire */
+  setTimeout(() => {
+    belowFold.forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.top < innerHeight && r.bottom > 0 && parseFloat(getComputedStyle(el).opacity) < 0.05) {
+        gsap.to(el, { opacity:1, y:0, filter:'blur(0px)', duration:.8, ease:'power2.out', overwrite:true });
+      }
+    });
+  }, 2000);
+}
+/* a little life on the chrome, 2D only */
+gsap.from('.nav', { y:-14, opacity:0, duration:1.2, ease:'power2.out', delay:.15 });
+gsap.from('.progress', { opacity:0, duration:1.6, delay:.4 });
+
+/* ═════════════ 9 · frame ═════════════ */
+let last = performance.now(), acc = 0, n = 0, running = true, hintOff = false;
+addEventListener('visibilitychange', () => { running = !document.hidden; if (running){ last = performance.now(); loop(); } });
+addEventListener('pointermove', (e) => { S.mtx = (e.clientX/S.W)*2-1; S.mty = (e.clientY/S.H)*2-1; }, { passive:true });
+
+function loop(){
+  if (!running) return;
+  const now = performance.now();
+  const dt = Math.min(0.05, (now-last)/1000); last = now;
+  acc += dt; n++;
+  if (acc > 0.8){ setLive('fps', Math.round(n/acc)+' fps'); acc = 0; n = 0; }
+
+  if (!REDUCE) S.t += dt * 0.92;
+  if (FORCE_PH !== null) S.p = FORCE_PH;
+  else S.p += (S.tgt - S.p) * Math.min(1, dt * 3.5);
+  S.mx += (S.mtx - S.mx) * Math.min(1, dt*2.2);
+  S.my += (S.mty - S.my) * Math.min(1, dt*2.2);
+  uni.uPar.value.set(S.mx, S.my);   /* item 22: the single smoothed parallax pair */
+  S.sink = (REDUCE?0:Math.sin(S.t*0.19)*0.0030 + Math.sin(S.t*0.071)*0.0020) - S.my*0.004;
+
+  if (now - lastClk > 120){ lastClk = now; applyDay(); } else dayAt(S.p);
+  applyWeather(dt);
+  updateWaterline(dt);
+
+  uni.uTime.value = S.t; uni.uSink.value = S.sink;
+  const nb = Math.min(8, S.boxes.length);
+  for (let i=0;i<nb;i++){ const b=S.boxes[i]; uni.uBox.value[i].set(b.cx,b.amp,b.hw,b.dir); }
+  for (let i=nb;i<8;i++) uni.uBox.value[i].set(0,0,0.1,1);
+  uni.uBoxN.value = nb;
+  const nr = Math.min(6, S.rips.length);
+  for (let i=0;i<nr;i++){ const r=S.rips[i]; uni.uRip.value[i].set(r.cx, r.amp, r.t0, r.dir); }
+  uni.uRipN.value = nr;
+
+  pbar.style.transform = 'scaleX(' + S.p.toFixed(4) + ')';
+
+  worldCam.position.x += (S.mx*1.3 - worldCam.position.x)*Math.min(1,dt*1.6);
+  worldCam.position.y += (1.9 - S.my*0.5 - worldCam.position.y)*Math.min(1,dt*1.6);
+  worldCam.lookAt(worldCam.position.x*0.35, -9, -24);
+  if (!MOBILE) updateSchools(S.t);
+
+  /* pass 1 → sea + matter into the target */
+  renderer.setRenderTarget(rtSea);
+  renderer.clear(true,true,true);
+  renderer.render(oceanScene, oceanCam);
+  renderer.clearDepth();
+  renderer.render(worldScene, worldCam);
+  /* pass 2 → refract through the screen-space mask, to the canvas */
+  if (splashFx && bubbleFx) {
+    splashFx.step(dt); bubbleFx.step(dt); crownFx.step(dt);
+    if (SYNTH && performance.now() < SYNTH.until) {
+      if (Math.random() < 0.5) {                      /* representative density, not every frame */
+        splashFx.emit(SYNTH.cx, SYNTH.wNdc, 0.55, SYNTH.prof);
+        bubbleFx.emit(SYNTH.cx, SYNTH.wNdc, 0.55, SYNTH.prof);
+      }
+      if (Math.random() < 0.02) spawnRipple(SYNTH.cx, 1.0, Math.random() < 0.5 ? 1 : -1);
+    }
+  }
+  if (ECO && flock3 && meteors) {
+    /* item 21c: the flock is a daylight thing; it fades out through dusk and
+       never appears at night. Real silhouette contrast, never a watermark. */
+    const x = Math.max(0, Math.min(1, (D.el + 3) / 11));
+    const dayF = x * x * (3 - 2 * x) * (1 - D.ca * 0.35) * (1 - S.storm * 0.95);
+    flock3.mat.uniforms.uDay.value = dayF;
+    flock3.step(dt, dayF);
+    /* shooting stars only well after dark and under thin cloud */
+    meteors.mat.uniforms.uDay.value = 1;
+    const skyOk = D.star > 0.55 && D.ca < 0.42 && S.storm < 0.3;
+    meteors.step(skyOk ? dt : 0, S.t);
+  }
+  /* item 21b: the storm itself is painted over the DOM, after the composite */
+  rainLayer.frame(dt);
+  /* item 20 — spray answers the day cycle: warm at dusk, silver-blue at night */
+  if (splashFx && bubbleFx) {
+    const ft = uni.uLightCol.value, fdk = Math.max(0.25, Math.min(1, D.uw));
+    splashFx.mat.uniforms.uTint.value.set(0.30 + ft.x * 0.55 * fdk, 0.42 + ft.y * 0.45 * fdk, 0.52 + ft.z * 0.38 * fdk);
+    bubbleFx.mat.uniforms.uTint.value.set(0.22 + ft.x * 0.42 * fdk, 0.40 + ft.y * 0.40 * fdk, 0.50 + ft.z * 0.34 * fdk);
+    crownFx.mat.uniforms.uTint.value.copy(splashFx.mat.uniforms.uTint.value);   /* item 24 */
+  }
+  renderer.setRenderTarget(null);
+  renderer.clear(true,true,true);
+  renderer.render(compScene, compCam);
+  renderer.render(fxScene, oceanCam);
+
+  if (!hintOff && S.p > 0.02){ document.getElementById('hint').style.opacity='0'; hintOff = true; }
+  else if (hintOff && S.p <= 0.01){ document.getElementById('hint').style.opacity='1'; hintOff = false; }
+
+  requestAnimationFrame(loop);
+}
+
+/* ═════════════ 10 · resize / teardown ═════════════ */
+/* Debug/tuning hook: ?ph=0.4 forces that moment of the day without scrolling,
+   so the cycle can be inspected frame-by-frame (headless capture also needs a
+   scroll-free viewport). ?p= scrolls to a real position in the page. */
+const PH0 = parseFloat(new URLSearchParams(location.search).get('ph'));
+const FORCE_PH = Number.isFinite(PH0) ? Math.max(0, Math.min(1, PH0)) : null;
+let rT;
+addEventListener('resize', () => { clearTimeout(rT); rT = setTimeout(() => {
+  measure();
+  renderer.setPixelRatio(Math.min(devicePixelRatio||1, DPR));
+  renderer.setSize(S.W, S.H, false);
+  uni.uRes.value.set(S.W, S.H);
+  moteMat.uniforms.uPix.value = fishMat.uniforms.uPix.value = renderer.getPixelRatio();
+  splashFx.mat.uniforms.uPix.value = bubbleFx.mat.uniforms.uPix.value = renderer.getPixelRatio();
+  crownFx.mat.uniforms.uPix.value = renderer.getPixelRatio();
+  rainLayer.resize();
+  if (ECO && flock3 && meteors) { flock3.mat.uniforms.uPix.value = meteors.mat.uniforms.uPix.value = renderer.getPixelRatio(); }
+  worldCam.aspect = S.W/S.H; worldCam.updateProjectionMatrix();
+  remap();
+  sizeTargets(); ScrollTrigger.refresh();
+}, 150); }, { passive:true });
+
+addEventListener('beforeunload', () => {
+  running = false;
+  [oceanQuad, compQuad, motes, fish].forEach(o => { if(o) o.geometry.dispose(); });
+  [oceanMat, compMat, moteMat, fishMat].forEach(m => m && m.dispose());
+  rtSea.dispose(); maskTex.dispose();
+  if (splashFx) splashFx.mat.dispose(); if (bubbleFx) bubbleFx.mat.dispose();
+  if (crownFx) crownFx.mat.dispose();
+  if (boltFx) { boltFx.lineM.dispose(); boltFx.brM.dispose(); boltFx.glowM.dispose();
+    boltFx.gM.dispose(); boltFx.gB.dispose(); boltFx.gG.dispose(); }
+  if (ECO && flock3 && meteors) { flock3.mat.dispose(); meteors.mat.dispose(); }
+  ScrollTrigger.getAll().forEach(t=>t.kill());
+  renderer.dispose();
+});
+
+/* fish need kind 2 in the vertex shader too */
+fishMat.vertexShader = FIELD_VERT;
+remap();
+liveAll();
+setLive('gl', renderer.capabilities.isWebGL2 !== false ? 'WebGL2' : 'WebGL1');
+const P0 = parseFloat(new URLSearchParams(location.search).get('p'));
+const maxScroll = () => Math.max(1, document.documentElement.scrollHeight - innerHeight);
+if (Number.isFinite(P0) && P0 > 0) requestAnimationFrame(() => scrollTo(0, maxScroll()*Math.min(1,P0)));
+(function initWeatherUI(){
+  const btn = document.getElementById('wxbtn'), lab = btn.querySelector('span');
+  const paint = () => { const on = S.stormT > 0.5;
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false'); lab.textContent = on ? 'Storm' : 'Clear'; };
+  btn.addEventListener('click', () => { S.stormT = S.stormT > 0.5 ? 0 : 1; paint(); });
+  paint();
+  if (Q.get('stormDebug') === '1'){
+    const d = document.createElement('div'); d.id = 'wxdbg'; document.body.appendChild(d);
+    S.dbg = () => { d.textContent =
+      'stormFactor ' + S.storm.toFixed(2) + '\n' +
+      'cloudCover  ' + uni.uCloudAmt.value.toFixed(2) + '\n' +
+      'rain        ' + S.rainA.toFixed(2) + '  windX ' + S.windX.toFixed(2) + '\n' +
+      'rainHits    ' + FXSTAT.rainHits + '  crown ' + FXSTAT.rainhit + '/' + FXSTAT.rainhitTotal + '\n' +
+      'streaks     ' + rainLayer.stats().active + '/' + rainLayer.stats().drops + '\n' +
+      'waveAmp     ' + S.wamp.toFixed(2) + '  skew ' + S.skew.toFixed(2) + '\n' +
+      'cloudDev    ' + uni.uCdev.value.toFixed(2) + '\n' +
+      'flash       ' + uni.uFlash.value.toFixed(2) + '\n' +
+      'ripples     ' + S.rips.length + '/6   lightning ' + FXSTAT.lightning; };
+  }
+})();
+applyDay();
+renderer.compile(oceanScene, oceanCam);
+renderer.compile(worldScene, worldCam);
+renderer.compile(compScene, compCam);
+loop();
+requestAnimationFrame(() => { boot.classList.add('off'); setTimeout(() => boot.remove(), 1400); });
+window.__oceanReady = true;
+/* verification handles (used by ?probe sessions and CDP checks) */
+window.__fx = FXSTAT; window.__S = S; window.__uni = uni;
+/* item 21b/23/24 handles: rain layer, manual strike, raw cut sampler, flock */
+window.__rainLayer = rainLayer; window.__strike = () => strikeLightning();
+/* item 23 probe helper: strike with a held channel (seconds) for capture */
+window.__strikeHold = (sec) => { S.flashK = 0.12; strikeLightning();
+  if (boltFx) { boltFx.span += sec; boltFx.life += sec; } return { flash: +S.flash.toFixed(2), life: boltFx ? +boltFx.life.toFixed(2) : 0 }; };
+window.__edgePx = edgePx; window.__flock = flock; window.__flock3 = () => flock3;
+window.__mote = moteGeo; window.__worldCam = worldCam; window.__NB = { N_MOTE, N_BUB };
+window.__px = (x0, y0, x1, y1, thr) => {
+  const c = document.getElementById('ocean');
+  const t = document.createElement('canvas'); t.width = c.width; t.height = c.height;
+  const g = t.getContext('2d'); g.drawImage(c, 0, 0);
+  const d = g.getImageData(Math.round(x0 * c.width), Math.round(y0 * c.height),
+    Math.max(1, Math.round((x1 - x0) * c.width)), Math.max(1, Math.round((y1 - y0) * c.height))).data;
+  let n = 0, sum = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const l = (d[i] + d[i + 1] + d[i + 2]) / 3;
+    if (l > thr) { n++; sum += l; }
+  }
+  return { bright: n, mean: n ? (sum / n).toFixed(1) : 0 }; };
+/* ?debugWater=1 — the JS-computed cut, drawn over the shader's cut.
+   If the two coincide, the maths agrees; if not, this shows by how much. */
+const DEBUG_W = Q.get('debugWater') === '1';
+if (DEBUG_W) {
+  const strip = document.getElementById('dbgEdge');
+  strip.classList.add('on');
+  const N = 96, ticks = [];
+  for (let i = 0; i < N; i++) { const b = document.createElement('i'); strip.appendChild(b); ticks.push(b); }
+  const draw = () => {
+    for (let i = 0; i < N; i++) {
+      const px = (i / (N - 1)) * S.W;
+      ticks[i].style.left = px + 'px';
+      ticks[i].style.top = (edgePx(px) - strip.getBoundingClientRect().top) + 'px';
+    }
+    strip.style.top = '0px';
+    requestAnimationFrame(draw);
+  };
+  requestAnimationFrame(draw);
+  console.log('DBGW| NEARX=' + NEARX.toFixed(4) + ' HTON=' + HTON.toFixed(5) +
+    ' uNearX=' + uni.uNearX.value.toFixed(4) + ' uHtoN=' + uni.uHtoN.value.toFixed(5) +
+    ' uWn=' + uni.uWn.value + ' edgeNdc(0)=' + edgeNdc(0).toFixed(4) +
+    ' -> px ' + pxYofNdc(edgeNdc(0)).toFixed(1) + ' of ' + S.H);
+}
+
+/* report the submersion maths for the hero blocks, once */
+setTimeout(() => {
+  wls.slice(0, 3).forEach((el, i) => {
+    const r = el.node.getBoundingClientRect();
+    const e = edgePx(r.left + r.width * 0.5);
+    console.log('SUB| wl' + i + ' top=' + Math.round(r.top) + ' bottom=' + Math.round(r.bottom) +
+      ' jsEdgePx=' + Math.round(e) + ' sub=' + (el.sub0 || 0).toFixed(3) +
+      ' uniformEdgePx=' + Math.round(pxYofNdc(uni.uBase.value + uni.uSink.value)) +
+      ' wavePxAtCenter=' + (edgeNdc(ndcXof(r.left + r.width * 0.5)) * S.H / 2).toFixed(1));
+  });
+}, 4000);
+if (Q.get('probe') === '1') setTimeout(() => {
+  const rows = [];
+  document.querySelectorAll('.wl').forEach((n, i) => {
+    const r = n.getBoundingClientRect();
+    if (r.bottom < 200 || r.top > 800) return;
+    const cs = getComputedStyle(n);
+    rows.push('wl' + i + ' cls=[' + n.className + '] rect=' + Math.round(r.left) + ',' + Math.round(r.top) +
+      ',' + Math.round(r.width) + 'x' + Math.round(r.height) + ' op=' + cs.opacity + ' vis=' + cs.visibility);
+  });
+  [[700, 520], [400, 520], [1100, 520], [700, 700]].forEach(([x, y]) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return;
+    const cs = getComputedStyle(el);
+    let chain = [], p = el;
+    for (let i = 0; i < 4 && p; i++) { chain.push(p.tagName + '.' + String(p.className).slice(0, 34) + '{' + cs.backgroundColor + '}'); p = p.parentElement; }
+    rows.push('hit ' + x + ',' + y + ' -> ' + chain.join(' < '));
+  });
+  rows.forEach(r => console.log('PROBE| ' + r));
+  /* elementsFromPoint sees pointer-events:none overlays, which elementFromPoint skips */
+  [[400, 600], [700, 600], [400, 500], [1100, 700]].forEach(([x, y]) => {
+    const stack = document.elementsFromPoint(x, y).slice(0, 6).map((e) => {
+      const cs = getComputedStyle(e);
+      return e.tagName + '.' + String(e.className).slice(0, 26) + ' bg=' + cs.backgroundColor +
+        ' blend=' + cs.mixBlendMode + ' op=' + cs.opacity + ' bf=' + (cs.backdropFilter || 'none').slice(0, 18);
+    });
+    console.log('STACK| ' + x + ',' + y + ' :: ' + stack.join(' | '));
+  });
+  /* which .wl blocks feed the refraction mask right now, and is the mask
+     covering pixels where no UI actually is? */
+  const mkx = maskCv.width / S.W, mky = maskCv.height / S.H;
+  wls.forEach((el, i) => {
+    const r = el.node.getBoundingClientRect();
+    if (r.bottom < -100 || r.top > S.H + 100) return;
+    console.log('MASK| wl' + i + ' rect=' + Math.round(r.left) + ',' + Math.round(r.top) + ',' +
+      Math.round(r.width) + 'x' + Math.round(r.height) + ' sub=' + (el.sub0 || 0).toFixed(3) +
+      ' cls=' + String(el.node.className).slice(0, 28));
+  });
+  const px1 = maskCtx.getImageData(Math.round(400 * mkx), Math.round(600 * mky), 1, 1).data;
+  const px2 = maskCtx.getImageData(Math.round(700 * mkx), Math.round(520 * mky), 1, 1).data;
+  const px3 = maskCtx.getImageData(Math.round(200 * mkx), Math.round(700 * mky), 1, 1).data;
+  console.log('MASK| cover 400,600=' + px1[0] + ' 700,520=' + px2[0] + ' 200,700=' + px3[0]);
+  console.log('PROBE| fx=' + JSON.stringify(FXSTAT));
+  setTimeout(() => console.log('PROBE| fx@9s ' + JSON.stringify(FXSTAT)), 6000);
+}, 3000);
+
+/* ?probe=2 drives a real scroll so impact / splash / wet can be measured at all */
+if (Q.get('probe') === '2') setTimeout(() => {
+  let f = 0;
+  const max = () => Math.max(1, document.documentElement.scrollHeight - innerHeight);
+  const tick = () => {
+    f++;
+    window.scrollTo(0, Math.min(max(), f * innerHeight * 0.05));
+    if (f === 12 || f === 28 || f === 60 || f === 110) console.log('FXPROBE| f=' + f + ' y=' + Math.round(scrollY) + ' ' + JSON.stringify(FXSTAT));
+    if (f < 120) requestAnimationFrame(tick);
+    else console.log('FXPROBE| end ' + JSON.stringify(FXSTAT));
+  };
+  requestAnimationFrame(tick);
+}, 1500);
+
+/* ?probe=3 fires the spray / ripple / wet paths directly. Headless SwiftShader
+   only manages a couple of frames per second, so scroll-driven impact cannot be
+   measured here — this isolates "does it render" from "does it trigger". */
+if (Q.get('probe') === '3') setTimeout(() => {
+  const n = document.querySelector('#hero .wl:not(.wl--bare)');
+  if (!n || !splashFx) { console.log('SYNTH| unavailable'); return; }
+  const r = n.getBoundingClientRect();
+  const cx = ndcXof(r.left + r.width * 0.5);
+  const wNdc = Math.max(0.02, Math.abs(ndcXof(r.left + r.width) - cx));
+  const prof = profileOf(r, false);
+  for (let k = 0; k < 8; k++) { splashFx.emit(cx, wNdc, 0.9, prof); bubbleFx.emit(cx, wNdc, 0.9, prof); }
+  spawnRipple(cx, 1.2, 1);
+  n.classList.add('dripping');
+  /* keep firing every frame so a slow software renderer cannot capture a frame
+     in which every particle has already expired */
+  SYNTH = { cx, wNdc, prof, until: performance.now() + 120000 };
+  console.log('SYNTH| t0 ' + JSON.stringify(FXSTAT) + ' cx=' + cx.toFixed(3) + ' w=' + wNdc.toFixed(3) + ' mass=' + prof.mass.toFixed(2));
+  setTimeout(() => console.log('SYNTH| later ' + JSON.stringify(FXSTAT)), 1200);
+}, 2500);
+{ const o = document.getElementById('oops'); if (o) o.remove(); }
+</script>
+
+<script>
+setTimeout(function(){
+  if(!window.__oceanReady){var o=document.getElementById('oops'),b=document.getElementById('boot');
+    if(o&&b){o.classList.add('on');b.classList.add('off');}}
+},16000);
+</script>
+</body>
+</html>
